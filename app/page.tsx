@@ -117,6 +117,24 @@ export default function Home() {
           {message && <p className="text-center text-yellow-500">{message}</p>}
         </form>
       </section>
+
+      <section className="px-6 py-20 text-center">
+        <h2 className="mb-8 text-4xl font-bold">Prenota dal telefono</h2>
+
+        <div className="mx-auto flex max-w-md flex-col items-center">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src="https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=https%3A%2F%2Fgentleman-barber-kappa.vercel.app%2F"
+            alt="QR code per prenotare sul sito The Gentleman"
+            width={220}
+            height={220}
+            className="border-4 border-yellow-500 bg-white p-3"
+          />
+          <p className="mt-6 text-lg text-gray-300">
+            Scansiona il QR code per prenotare dal tuo smartphone
+          </p>
+        </div>
+      </section>
     </main>
   );
 }
