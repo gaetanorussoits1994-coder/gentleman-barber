@@ -6,6 +6,7 @@ import { supabase } from "@/lib/supabase";
 
 type Appointment = {
   id: string | number;
+  created_at?: string;
   name: string;
   phone: string;
   service: string;
@@ -28,14 +29,14 @@ function formatPhoneForWhatsApp(phone: string) {
 function buildWhatsAppUrl(appointment: Appointment, status: "confirmed" | "rejected") {
   const message =
     status === "confirmed"
-      ? `Ciao ${appointment.name}, la tua prenotazione presso The Gentleman è stata confermata.
+      ? `Ciao ${appointment.name}, la tua prenotazione presso The Gentleman è confermata.
 
 Servizio: ${appointment.service}
 Data: ${appointment.date}
 Ora: ${appointment.time}
 
 Ti aspettiamo.`
-      : `Ciao ${appointment.name}, ci dispiace ma la tua prenotazione presso The Gentleman non è disponibile.
+      : `Ciao ${appointment.name}, purtroppo l'orario richiesto non è disponibile.
 
 Servizio: ${appointment.service}
 Data: ${appointment.date}
@@ -64,11 +65,20 @@ function getStatusBadgeClass(status: Appointment["status"]) {
   return "border-yellow-500 text-yellow-500";
 }
 
+function getToday() {
+  const today = new Date();
+  const year = today.getFullYear();
+  const month = String(today.getMonth() + 1).padStart(2, "0");
+  const day = String(today.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 export default function AdminPage() {
   const router = useRouter();
   const [appointments, setAppointments] = useState<Appointment[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [selectedDate, setSelectedDate] = useState(getToday);
 
   useEffect(() => {
     let active = true;
@@ -213,6 +223,10 @@ export default function AdminPage() {
     );
   }
 
+  const dailyAppointments = appointments
+    .filter((appointment) => appointment.date === selectedDate)
+    .sort((first, second) => first.time.localeCompare(second.time));
+
   if (loading) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-black text-yellow-500">
@@ -223,7 +237,7 @@ export default function AdminPage() {
 
   return (
     <main className="min-h-screen bg-black p-8 text-white">
-      <div className="mb-8 flex items-center justify-between gap-4">
+      <div className="mb-8 flex flex-wrap items-center justify-between gap-4">
         <h1 className="text-4xl font-bold text-yellow-500">
           Prenotazioni - The Gentleman
         </h1>
@@ -242,6 +256,42 @@ export default function AdminPage() {
         </p>
       )}
 
+      <section className="mb-8 grid gap-5 rounded-2xl border border-zinc-800 bg-zinc-950 p-5 md:grid-cols-[minmax(220px,320px)_1fr] md:items-end">
+        <label className="grid gap-2">
+          <span className="font-semibold text-yellow-500">
+            Giornata da visualizzare
+          </span>
+          <input
+            type="date"
+            value={selectedDate}
+            onChange={(event) => setSelectedDate(event.target.value)}
+            className="rounded-lg border border-zinc-700 bg-white p-3 text-black"
+          />
+        </label>
+
+        <div>
+          <p className="mb-2 text-sm font-semibold uppercase tracking-wider text-gray-400">
+            Legenda
+          </p>
+          <div className="flex flex-wrap gap-3 text-sm">
+            <span className="rounded-full border border-yellow-500 px-3 py-1 text-yellow-500">
+              pending = in attesa
+            </span>
+            <span className="rounded-full border border-green-500 px-3 py-1 text-green-400">
+              confirmed = confermato
+            </span>
+            <span className="rounded-full border border-red-500 px-3 py-1 text-red-400">
+              rejected = rifiutato
+            </span>
+          </div>
+        </div>
+      </section>
+
+      <p className="mb-4 text-gray-300">
+        {dailyAppointments.length} appuntament
+        {dailyAppointments.length === 1 ? "o" : "i"} per il {selectedDate}
+      </p>
+
       <div className="overflow-x-auto">
         <table className="w-full border-collapse bg-zinc-900">
           <thead>
@@ -258,7 +308,7 @@ export default function AdminPage() {
           </thead>
 
           <tbody>
-            {appointments.map((item) => (
+            {dailyAppointments.map((item) => (
               <tr key={item.id} className="border-b border-zinc-800">
                 <td className="p-4">{item.name}</td>
                 <td className="p-4">{item.phone}</td>
@@ -302,6 +352,13 @@ export default function AdminPage() {
                 </td>
               </tr>
             ))}
+            {dailyAppointments.length === 0 && (
+              <tr>
+                <td colSpan={8} className="p-8 text-center text-gray-400">
+                  Nessun appuntamento per questa data.
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>

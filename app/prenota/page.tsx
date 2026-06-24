@@ -18,8 +18,14 @@ type ExistingAppointment = {
   status: string | null;
 };
 
+type DailySlot = {
+  time: string;
+  available: boolean;
+};
+
 const CLOSED_DAY_MESSAGE = "Il locale è chiuso il lunedì.";
-const NO_SLOTS_MESSAGE = "Nessuno slot disponibile per la data selezionata.";
+const UNAVAILABLE_SLOT_MESSAGE =
+  "Questo orario non è più disponibile. Scegli un altro slot.";
 const ADMIN_WHATSAPP = process.env.NEXT_PUBLIC_ADMIN_WHATSAPP?.replace(/\D/g, "");
 
 function timeToMinutes(time: string) {
@@ -54,10 +60,10 @@ function overlaps(
   return start < appointmentEnd && start + duration > appointmentStart;
 }
 
-function createAvailableSlots(
+function createDailySlots(
   service: Service,
   appointments: ExistingAppointment[],
-) {
+): DailySlot[] {
   const duration = SERVICES[service];
   const shifts = [
     [8 * 60, 12 * 60 + 30],
@@ -65,7 +71,7 @@ function createAvailableSlots(
   ];
 
   return shifts.flatMap(([shiftStart, shiftEnd]) => {
-    const slots: string[] = [];
+    const slots: DailySlot[] = [];
 
     for (let start = shiftStart; start + duration <= shiftEnd; start += 15) {
       const occupied = appointments.some(
@@ -74,9 +80,10 @@ function createAvailableSlots(
           overlaps(start, duration, appointment),
       );
 
-      if (!occupied) {
-        slots.push(minutesToTime(start));
-      }
+      slots.push({
+        time: minutesToTime(start),
+        available: !occupied,
+      });
     }
 
     return slots;
@@ -99,8 +106,7 @@ function buildWhatsAppUrl(details: {
   time: string;
   notes: string;
 }) {
-  const message = `Nuova prenotazione The Gentleman
-
+  const message = `Nuova richiesta prenotazione:
 Nome: ${details.name}
 Telefono: ${details.phone}
 Servizio: ${details.service}
@@ -148,7 +154,7 @@ export default function BookingPage() {
       setLoadingSlots(false);
 
       if (error) {
-        setMessage("Impossibile caricare gli slot disponibili.");
+        setMessage("Impossibile caricare gli orari disponibili.");
         return;
       }
 
@@ -162,10 +168,11 @@ export default function BookingPage() {
     };
   }, [date]);
 
-  const availableSlots = useMemo(
-    () => createAvailableSlots(service, appointments),
+  const dailySlots = useMemo(
+    () => createDailySlots(service, appointments),
     [service, appointments],
   );
+  const availableSlots = dailySlots.filter((slot) => slot.available);
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -176,8 +183,8 @@ export default function BookingPage() {
       return;
     }
 
-    if (!time || !availableSlots.includes(time)) {
-      setMessage("Lo slot selezionato non è più disponibile.");
+    if (!time || !availableSlots.some((slot) => slot.time === time)) {
+      setMessage(UNAVAILABLE_SLOT_MESSAGE);
       return;
     }
 
@@ -200,17 +207,17 @@ export default function BookingPage() {
       return;
     }
 
-    const stillAvailable = createAvailableSlots(
+    const updatedAppointments =
+      (currentAppointments ?? []) as ExistingAppointment[];
+    const stillAvailable = createDailySlots(
       service,
-      (currentAppointments ?? []) as ExistingAppointment[],
-    ).includes(time);
+      updatedAppointments,
+    ).some((slot) => slot.time === time && slot.available);
 
     if (!stillAvailable) {
-      setAppointments(
-        (currentAppointments ?? []) as ExistingAppointment[],
-      );
+      setAppointments(updatedAppointments);
       setTime("");
-      setMessage("Lo slot selezionato non è più disponibile.");
+      setMessage(UNAVAILABLE_SLOT_MESSAGE);
       setSubmitting(false);
       return;
     }
@@ -239,6 +246,7 @@ export default function BookingPage() {
     setService("Taglio Uomo");
     setDate("");
     setTime("");
+    setAppointments([]);
     window.open(
       buildWhatsAppUrl({ name, phone, service, date, time, notes }),
       "_blank",
@@ -248,7 +256,7 @@ export default function BookingPage() {
 
   return (
     <main className="min-h-screen bg-black px-6 py-12 text-white">
-      <div className="mx-auto max-w-2xl">
+      <div className="mx-auto max-w-3xl">
         <Link
           href="/"
           className="text-sm font-semibold uppercase tracking-[0.2em] text-yellow-500"
@@ -270,87 +278,119 @@ export default function BookingPage() {
 
         <form
           onSubmit={handleSubmit}
-          className="grid gap-5 rounded-3xl border border-yellow-500/40 bg-zinc-950 p-6 shadow-[0_0_45px_rgba(234,179,8,0.1)] sm:p-9"
+          className="grid gap-6 rounded-3xl border border-yellow-500/40 bg-zinc-950 p-6 shadow-[0_0_45px_rgba(234,179,8,0.1)] sm:p-9"
         >
-          <label className="grid gap-2">
-            <span className="font-semibold text-yellow-500">Nome</span>
-            <input
-              name="name"
-              required
-              autoComplete="name"
-              className="rounded-xl border border-zinc-700 bg-white p-4 text-black"
-            />
-          </label>
+          <div className="grid gap-5 sm:grid-cols-2">
+            <label className="grid gap-2">
+              <span className="font-semibold text-yellow-500">Nome</span>
+              <input
+                name="name"
+                required
+                autoComplete="name"
+                className="rounded-xl border border-zinc-700 bg-white p-4 text-black"
+              />
+            </label>
 
-          <label className="grid gap-2">
-            <span className="font-semibold text-yellow-500">Telefono</span>
-            <input
-              name="phone"
-              required
-              type="tel"
-              autoComplete="tel"
-              className="rounded-xl border border-zinc-700 bg-white p-4 text-black"
-            />
-          </label>
+            <label className="grid gap-2">
+              <span className="font-semibold text-yellow-500">Telefono</span>
+              <input
+                name="phone"
+                required
+                type="tel"
+                autoComplete="tel"
+                className="rounded-xl border border-zinc-700 bg-white p-4 text-black"
+              />
+            </label>
+          </div>
 
-          <label className="grid gap-2">
-            <span className="font-semibold text-yellow-500">Servizio</span>
-            <select
-              name="service"
-              value={service}
-              onChange={(event) => {
-                setService(event.target.value as Service);
-                setTime("");
-              }}
-              className="rounded-xl border border-zinc-700 bg-white p-4 text-black"
-            >
-              {Object.entries(SERVICES).map(([name, duration]) => (
-                <option key={name} value={name}>
-                  {name} — {duration} minuti
-                </option>
-              ))}
-            </select>
-          </label>
+          <div className="grid gap-5 sm:grid-cols-2">
+            <label className="grid gap-2">
+              <span className="font-semibold text-yellow-500">Servizio</span>
+              <select
+                name="service"
+                value={service}
+                onChange={(event) => {
+                  setService(event.target.value as Service);
+                  setTime("");
+                }}
+                className="rounded-xl border border-zinc-700 bg-white p-4 text-black"
+              >
+                {Object.entries(SERVICES).map(([name, duration]) => (
+                  <option key={name} value={name}>
+                    {name} — {duration} minuti
+                  </option>
+                ))}
+              </select>
+            </label>
 
-          <label className="grid gap-2">
-            <span className="font-semibold text-yellow-500">Data</span>
-            <input
-              name="date"
-              required
-              type="date"
-              min={getToday()}
-              value={date}
-              onChange={(event) => setDate(event.target.value)}
-              className="rounded-xl border border-zinc-700 bg-white p-4 text-black"
-            />
-          </label>
+            <label className="grid gap-2">
+              <span className="font-semibold text-yellow-500">Data</span>
+              <input
+                name="date"
+                required
+                type="date"
+                min={getToday()}
+                value={date}
+                onChange={(event) => setDate(event.target.value)}
+                className="rounded-xl border border-zinc-700 bg-white p-4 text-black"
+              />
+            </label>
+          </div>
 
-          <label className="grid gap-2">
-            <span className="font-semibold text-yellow-500">
-              Slot disponibile
-            </span>
-            <select
-              name="time"
-              required
-              value={time}
-              onChange={(event) => setTime(event.target.value)}
-              disabled={!date || isMonday(date) || loadingSlots}
-              className="rounded-xl border border-zinc-700 bg-white p-4 text-black disabled:cursor-not-allowed disabled:bg-zinc-300"
-            >
-              <option value="">
-                {loadingSlots
-                  ? "Caricamento..."
-                  : date && !isMonday(date) && availableSlots.length === 0
-                    ? NO_SLOTS_MESSAGE
-                    : "Seleziona un orario"}
-              </option>
-              {availableSlots.map((slot) => (
-                <option key={slot} value={slot}>
-                  {slot}
-                </option>
-              ))}
-            </select>
-          </label>
+          <fieldset className="grid gap-3">
+            <legend className="font-semibold text-yellow-500">
+              Orari della giornata
+            </legend>
+
+            {!date && (
+              <p className="text-sm text-gray-400">
+                Seleziona una data per vedere gli orari.
+              </p>
+            )}
+
+            {loadingSlots && <p className="text-gray-400">Caricamento...</p>}
+
+            {date && isMonday(date) && (
+              <p className="font-medium text-yellow-500">
+                {CLOSED_DAY_MESSAGE}
+              </p>
+            )}
+
+            {date &&
+              !isMonday(date) &&
+              !loadingSlots &&
+              availableSlots.length === 0 && (
+                <p className="font-medium text-yellow-500">
+                  Nessun orario disponibile per questa data.
+                </p>
+              )}
+
+            {date && !isMonday(date) && !loadingSlots && (
+              <div className="grid grid-cols-3 gap-2 sm:grid-cols-5 md:grid-cols-6">
+                {dailySlots.map((slot) => (
+                  <button
+                    key={slot.time}
+                    type="button"
+                    disabled={!slot.available}
+                    onClick={() => setTime(slot.time)}
+                    className={
+                      slot.available
+                        ? `rounded-lg border px-2 py-3 text-sm font-bold transition ${
+                            time === slot.time
+                              ? "border-yellow-300 bg-yellow-300 text-black ring-2 ring-yellow-100"
+                              : "border-yellow-500 bg-yellow-500 text-black hover:bg-yellow-400"
+                          }`
+                        : "cursor-not-allowed rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-2 text-xs text-zinc-400"
+                    }
+                  >
+                    {slot.available ? slot.time : `${slot.time} Occupato`}
+                  </button>
+                ))}
+              </div>
+            )}
+          </fieldset>
+
+          <input name="time" type="hidden" value={time} />
 
           <label className="grid gap-2">
             <span className="font-semibold text-yellow-500">Note</span>
@@ -362,7 +402,7 @@ export default function BookingPage() {
           </label>
 
           <button
-            disabled={submitting || loadingSlots}
+            disabled={submitting || loadingSlots || !time}
             className="rounded-xl bg-yellow-500 p-4 font-bold text-black transition hover:bg-yellow-400 disabled:cursor-not-allowed disabled:opacity-60"
           >
             {submitting ? "Invio..." : "Invia Prenotazione"}
