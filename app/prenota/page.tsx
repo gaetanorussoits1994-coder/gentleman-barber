@@ -4,23 +4,41 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 
-const SERVICES = {
-  "Taglio Uomo": 45,
-  Barba: 30,
-  "Taglio + Barba": 60,
-} as const;
+type Service = {
+  id: string;
+  name: string;
+  price: number | null;
+  duration_minutes: number;
+  active: boolean;
+};
 
-type Service = keyof typeof SERVICES;
+type Operator = {
+  id: string;
+  name: string;
+  active: boolean;
+};
+
+type OperatorService = {
+  operator_id: string;
+  service_id: string;
+};
 
 type ExistingAppointment = {
   time: string;
   service: string;
+  service_id: string | null;
   status: string | null;
 };
 
 type DailySlot = {
   time: string;
   available: boolean;
+};
+
+const LEGACY_SERVICE_DURATIONS: Record<string, number> = {
+  "Taglio Uomo": 45,
+  Barba: 30,
+  "Taglio + Barba": 60,
 };
 
 const CLOSED_DAY_MESSAGE = "Il locale è chiuso il lunedì.";
@@ -44,27 +62,26 @@ function isMonday(date: string) {
   return new Date(year, month - 1, day).getDay() === 1;
 }
 
-function getServiceDuration(service: string) {
-  return SERVICES[service as Service] ?? 60;
-}
-
-function overlaps(
-  start: number,
-  duration: number,
+function getAppointmentDuration(
   appointment: ExistingAppointment,
+  services: Service[],
 ) {
-  const appointmentStart = timeToMinutes(appointment.time);
-  const appointmentEnd =
-    appointmentStart + getServiceDuration(appointment.service);
+  const linkedService = services.find(
+    (service) => service.id === appointment.service_id,
+  );
 
-  return start < appointmentEnd && start + duration > appointmentStart;
+  return (
+    linkedService?.duration_minutes ??
+    LEGACY_SERVICE_DURATIONS[appointment.service] ??
+    60
+  );
 }
 
 function createDailySlots(
-  service: Service,
+  duration: number,
   appointments: ExistingAppointment[],
+  services: Service[],
 ): DailySlot[] {
-  const duration = SERVICES[service];
   const shifts = [
     [8 * 60, 12 * 60 + 30],
     [13 * 60 + 30, 18 * 60],
@@ -74,11 +91,17 @@ function createDailySlots(
     const slots: DailySlot[] = [];
 
     for (let start = shiftStart; start + duration <= shiftEnd; start += 15) {
-      const occupied = appointments.some(
-        (appointment) =>
-          appointment.status !== "rejected" &&
-          overlaps(start, duration, appointment),
-      );
+      const occupied = appointments.some((appointment) => {
+        if (appointment.status === "rejected") {
+          return false;
+        }
+
+        const appointmentStart = timeToMinutes(appointment.time);
+        const appointmentEnd =
+          appointmentStart + getAppointmentDuration(appointment, services);
+
+        return start < appointmentEnd && start + duration > appointmentStart;
+      });
 
       slots.push({
         time: minutesToTime(start),
@@ -102,6 +125,7 @@ function buildWhatsAppUrl(details: {
   name: string;
   phone: string;
   service: string;
+  operator: string;
   date: string;
   time: string;
   notes: string;
@@ -110,6 +134,7 @@ function buildWhatsAppUrl(details: {
 Nome: ${details.name}
 Telefono: ${details.phone}
 Servizio: ${details.service}
+Operatore: ${details.operator}
 Data: ${details.date}
 Ora: ${details.time}
 Note: ${details.notes || "Nessuna"}`;
@@ -119,13 +144,71 @@ Note: ${details.notes || "Nessuna"}`;
 }
 
 export default function BookingPage() {
-  const [service, setService] = useState<Service>("Taglio Uomo");
+  const [services, setServices] = useState<Service[]>([]);
+  const [operators, setOperators] = useState<Operator[]>([]);
+  const [associations, setAssociations] = useState<OperatorService[]>([]);
+  const [serviceId, setServiceId] = useState("");
+  const [operatorId, setOperatorId] = useState("");
   const [date, setDate] = useState("");
   const [time, setTime] = useState("");
   const [appointments, setAppointments] = useState<ExistingAppointment[]>([]);
+  const [loadingConfiguration, setLoadingConfiguration] = useState(true);
   const [loadingSlots, setLoadingSlots] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState("");
+
+  useEffect(() => {
+    let active = true;
+
+    async function loadConfiguration() {
+      const [servicesResult, operatorsResult, associationsResult] =
+        await Promise.all([
+          supabase
+            .from("services")
+            .select("id, name, price, duration_minutes, active")
+            .eq("active", true)
+            .order("name"),
+          supabase
+            .from("operators")
+            .select("id, name, active")
+            .eq("active", true)
+            .order("name"),
+          supabase
+            .from("operator_services")
+            .select("operator_id, service_id"),
+        ]);
+
+      if (!active) {
+        return;
+      }
+
+      setLoadingConfiguration(false);
+
+      const configurationError =
+        servicesResult.error ||
+        operatorsResult.error ||
+        associationsResult.error;
+
+      if (configurationError) {
+        setMessage(
+          `Configurazione non disponibile: ${configurationError.message}`,
+        );
+        return;
+      }
+
+      setServices((servicesResult.data ?? []) as Service[]);
+      setOperators((operatorsResult.data ?? []) as Operator[]);
+      setAssociations(
+        (associationsResult.data ?? []) as OperatorService[],
+      );
+    }
+
+    void loadConfiguration();
+
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -134,8 +217,8 @@ export default function BookingPage() {
       setTime("");
       setAppointments([]);
 
-      if (!date || isMonday(date)) {
-        setMessage(date ? CLOSED_DAY_MESSAGE : "");
+      if (!operatorId || !date || isMonday(date)) {
+        setMessage(date && isMonday(date) ? CLOSED_DAY_MESSAGE : "");
         return;
       }
 
@@ -144,8 +227,9 @@ export default function BookingPage() {
 
       const { data, error } = await supabase
         .from("appointments")
-        .select("time, service, status")
-        .eq("date", date);
+        .select("time, service, service_id, status")
+        .eq("date", date)
+        .eq("operator_id", operatorId);
 
       if (!active) {
         return;
@@ -154,7 +238,7 @@ export default function BookingPage() {
       setLoadingSlots(false);
 
       if (error) {
-        setMessage("Impossibile caricare gli orari disponibili.");
+        setMessage(`Impossibile caricare gli orari: ${error.message}`);
         return;
       }
 
@@ -166,17 +250,40 @@ export default function BookingPage() {
     return () => {
       active = false;
     };
-  }, [date]);
+  }, [date, operatorId]);
 
+  const selectedService =
+    services.find((service) => service.id === serviceId) ?? null;
+  const selectedOperator =
+    operators.find((operator) => operator.id === operatorId) ?? null;
+  const availableOperators = operators.filter((operator) =>
+    associations.some(
+      (association) =>
+        association.operator_id === operator.id &&
+        association.service_id === serviceId,
+    ),
+  );
   const dailySlots = useMemo(
-    () => createDailySlots(service, appointments),
-    [service, appointments],
+    () =>
+      selectedService
+        ? createDailySlots(
+            selectedService.duration_minutes,
+            appointments,
+            services,
+          )
+        : [],
+    [appointments, selectedService, services],
   );
   const availableSlots = dailySlots.filter((slot) => slot.available);
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setMessage("");
+
+    if (!selectedService || !selectedOperator) {
+      setMessage("Seleziona servizio e operatore.");
+      return;
+    }
 
     if (!date || isMonday(date)) {
       setMessage(CLOSED_DAY_MESSAGE);
@@ -198,8 +305,9 @@ export default function BookingPage() {
     const { data: currentAppointments, error: availabilityError } =
       await supabase
         .from("appointments")
-        .select("time, service, status")
-        .eq("date", date);
+        .select("time, service, service_id, status")
+        .eq("date", date)
+        .eq("operator_id", selectedOperator.id);
 
     if (availabilityError) {
       setMessage("Impossibile verificare la disponibilità dello slot.");
@@ -210,8 +318,9 @@ export default function BookingPage() {
     const updatedAppointments =
       (currentAppointments ?? []) as ExistingAppointment[];
     const stillAvailable = createDailySlots(
-      service,
+      selectedService.duration_minutes,
       updatedAppointments,
+      services,
     ).some((slot) => slot.time === time && slot.available);
 
     if (!stillAvailable) {
@@ -226,7 +335,9 @@ export default function BookingPage() {
       {
         name,
         phone,
-        service,
+        service: selectedService.name,
+        service_id: selectedService.id,
+        operator_id: selectedOperator.id,
         date,
         time,
         notes,
@@ -243,12 +354,21 @@ export default function BookingPage() {
 
     setMessage("Prenotazione inviata con successo!");
     form.reset();
-    setService("Taglio Uomo");
+    setServiceId("");
+    setOperatorId("");
     setDate("");
     setTime("");
     setAppointments([]);
     window.open(
-      buildWhatsAppUrl({ name, phone, service, date, time, notes }),
+      buildWhatsAppUrl({
+        name,
+        phone,
+        service: selectedService.name,
+        operator: selectedOperator.name,
+        date,
+        time,
+        notes,
+      }),
       "_blank",
       "noopener,noreferrer",
     );
@@ -272,7 +392,7 @@ export default function BookingPage() {
             Prenota il tuo appuntamento
           </h1>
           <p className="mt-4 text-gray-400">
-            Aperto da martedì a domenica, 08:00-12:30 e 13:30-18:00.
+            Scegli servizio, operatore e uno degli orari disponibili.
           </p>
         </div>
 
@@ -307,35 +427,75 @@ export default function BookingPage() {
             <label className="grid gap-2">
               <span className="font-semibold text-yellow-500">Servizio</span>
               <select
-                name="service"
-                value={service}
+                name="service_id"
+                required
+                value={serviceId}
+                disabled={loadingConfiguration}
                 onChange={(event) => {
-                  setService(event.target.value as Service);
+                  setServiceId(event.target.value);
+                  setOperatorId("");
+                  setDate("");
                   setTime("");
                 }}
-                className="rounded-xl border border-zinc-700 bg-white p-4 text-black"
+                className="rounded-xl border border-zinc-700 bg-white p-4 text-black disabled:bg-zinc-300"
               >
-                {Object.entries(SERVICES).map(([name, duration]) => (
-                  <option key={name} value={name}>
-                    {name} — {duration} minuti
+                <option value="">
+                  {loadingConfiguration
+                    ? "Caricamento..."
+                    : "Seleziona servizio"}
+                </option>
+                {services.map((service) => (
+                  <option key={service.id} value={service.id}>
+                    {service.name} — {service.duration_minutes} min
+                    {service.price != null ? ` — €${service.price}` : ""}
                   </option>
                 ))}
               </select>
             </label>
 
             <label className="grid gap-2">
-              <span className="font-semibold text-yellow-500">Data</span>
-              <input
-                name="date"
+              <span className="font-semibold text-yellow-500">Operatore</span>
+              <select
+                name="operator_id"
                 required
-                type="date"
-                min={getToday()}
-                value={date}
-                onChange={(event) => setDate(event.target.value)}
-                className="rounded-xl border border-zinc-700 bg-white p-4 text-black"
-              />
+                value={operatorId}
+                disabled={!serviceId}
+                onChange={(event) => {
+                  setOperatorId(event.target.value);
+                  setDate("");
+                  setTime("");
+                }}
+                className="rounded-xl border border-zinc-700 bg-white p-4 text-black disabled:bg-zinc-300"
+              >
+                <option value="">
+                  {!serviceId
+                    ? "Seleziona prima il servizio"
+                    : availableOperators.length
+                      ? "Seleziona operatore"
+                      : "Nessun operatore disponibile"}
+                </option>
+                {availableOperators.map((operator) => (
+                  <option key={operator.id} value={operator.id}>
+                    {operator.name}
+                  </option>
+                ))}
+              </select>
             </label>
           </div>
+
+          <label className="grid gap-2">
+            <span className="font-semibold text-yellow-500">Data</span>
+            <input
+              name="date"
+              required
+              type="date"
+              min={getToday()}
+              value={date}
+              disabled={!operatorId}
+              onChange={(event) => setDate(event.target.value)}
+              className="rounded-xl border border-zinc-700 bg-white p-4 text-black disabled:bg-zinc-300"
+            />
+          </label>
 
           <fieldset className="grid gap-3">
             <legend className="font-semibold text-yellow-500">
@@ -344,7 +504,7 @@ export default function BookingPage() {
 
             {!date && (
               <p className="text-sm text-gray-400">
-                Seleziona una data per vedere gli orari.
+                Seleziona servizio, operatore e data per vedere gli orari.
               </p>
             )}
 
