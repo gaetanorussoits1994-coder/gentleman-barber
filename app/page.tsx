@@ -3,22 +3,49 @@
 import { useState } from "react";
 import { supabase } from "@/lib/supabase";
 
+const CLOSED_DAY_MESSAGE = "Il locale è chiuso il lunedì.";
+const INVALID_TIME_MESSAGE =
+  "Orario non disponibile. Scegli un orario tra 08:00-12:30 oppure 13:30-18:00.";
+
+function isMonday(date: string) {
+  const [year, month, day] = date.split("-").map(Number);
+  return new Date(year, month - 1, day).getDay() === 1;
+}
+
+function isAvailableTime(time: string) {
+  return (
+    (time >= "08:00" && time <= "12:30") ||
+    (time >= "13:30" && time <= "18:00")
+  );
+}
+
 export default function Home() {
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("");
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setLoading(true);
     setMessage("");
 
     const formData = new FormData(event.currentTarget);
     const name = formData.get("name");
     const phone = formData.get("phone");
     const service = formData.get("service");
-    const date = formData.get("date");
-    const time = formData.get("time");
+    const date = String(formData.get("date"));
+    const time = String(formData.get("time"));
     const notes = formData.get("notes");
+
+    if (isMonday(date)) {
+      setMessage(CLOSED_DAY_MESSAGE);
+      return;
+    }
+
+    if (!isAvailableTime(time)) {
+      setMessage(INVALID_TIME_MESSAGE);
+      return;
+    }
+
+    setLoading(true);
 
     const { error } = await supabase.from("appointments").insert([
       {
@@ -28,6 +55,7 @@ export default function Home() {
         date,
         time,
         notes,
+        status: "pending",
       },
     ]);
 
@@ -105,8 +133,34 @@ export default function Home() {
             <option>Taglio + Barba</option>
           </select>
 
-          <input name="date" required className="rounded-xl border border-zinc-700 bg-white p-4 text-black placeholder:text-zinc-500" type="date" />
-          <input name="time" required className="rounded-xl border border-zinc-700 bg-white p-4 text-black placeholder:text-zinc-500" type="time" />
+          <input
+            name="date"
+            required
+            className="rounded-xl border border-zinc-700 bg-white p-4 text-black placeholder:text-zinc-500"
+            type="date"
+            onChange={(event) =>
+              setMessage(
+                event.target.value && isMonday(event.target.value)
+                  ? CLOSED_DAY_MESSAGE
+                  : "",
+              )
+            }
+          />
+          <input
+            name="time"
+            required
+            className="rounded-xl border border-zinc-700 bg-white p-4 text-black placeholder:text-zinc-500"
+            type="time"
+            min="08:00"
+            max="18:00"
+            onChange={(event) =>
+              setMessage(
+                event.target.value && !isAvailableTime(event.target.value)
+                  ? INVALID_TIME_MESSAGE
+                  : "",
+              )
+            }
+          />
 
           <textarea name="notes" className="rounded-xl border border-zinc-700 bg-white p-4 text-black placeholder:text-zinc-500" placeholder="Note"></textarea>
 
@@ -118,42 +172,28 @@ export default function Home() {
         </form>
       </section>
 
-      <section className="px-6 py-20 text-center">
-        <h2 className="mb-8 text-4xl font-bold">Prenota dal telefono</h2>
-
-        <div className="mx-auto flex max-w-md flex-col items-center rounded-3xl border border-yellow-500/50 bg-zinc-950 px-6 py-10 shadow-[0_0_45px_rgba(234,179,8,0.12)]">
-          <div className="mb-7">
-            <p className="text-2xl font-extrabold tracking-[0.18em] text-yellow-500 sm:text-3xl">
-              THE GENTLEMAN
-            </p>
-            <p className="mt-2 text-[0.65rem] font-semibold uppercase tracking-[0.32em] text-yellow-100/70 sm:text-xs">
-              Premium Barber Experience
-            </p>
-          </div>
-
-          <div className="relative rounded-2xl border-2 border-yellow-500 bg-white p-3 shadow-[0_0_28px_rgba(234,179,8,0.2)]">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              src="https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=https%3A%2F%2Fgentleman-barber-kappa.vercel.app%2F"
-              alt="QR code per prenotare sul sito The Gentleman"
-              width={240}
-              height={240}
-              className="block h-auto w-full max-w-60"
-            />
-
-            <div
-              aria-hidden="true"
-              className="pointer-events-none absolute left-1/2 top-1/2 flex h-10 w-10 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-lg border-2 border-yellow-500 bg-black text-xs font-black tracking-wider text-yellow-500 shadow-[0_0_0_3px_white]"
-            >
-              TG
-            </div>
-          </div>
-
-          <p className="mt-6 text-lg text-gray-300">
-            Scansiona il QR code per prenotare dal tuo smartphone
+      <footer className="border-t border-yellow-500/40 bg-black px-6 py-14 text-center">
+        <div className="mx-auto max-w-xl">
+          <p className="text-2xl font-extrabold tracking-[0.2em] text-yellow-500">
+            The Gentleman
           </p>
+          <address className="mt-4 not-italic text-gray-300">
+            Via Gattamelata, 35129 Padova (PD)
+          </address>
+
+          <div className="mx-auto my-7 h-px w-24 bg-yellow-500/60" />
+
+          <p className="font-semibold uppercase tracking-[0.2em] text-yellow-500">
+            Orari di apertura
+          </p>
+          <div className="mt-4 space-y-1 text-gray-300">
+            <p>Martedì - Domenica</p>
+            <p>08:00 - 12:30</p>
+            <p>13:30 - 18:00</p>
+            <p className="pt-3 font-semibold text-yellow-500">Lunedì chiuso</p>
+          </div>
         </div>
-      </section>
+      </footer>
     </main>
   );
 }
