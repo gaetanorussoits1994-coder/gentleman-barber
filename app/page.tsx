@@ -121,15 +121,34 @@ export default function Home() {
       <section className="px-6 py-20 text-center">
         <h2 className="mb-8 text-4xl font-bold">Prenota dal telefono</h2>
 
-        <div className="mx-auto flex max-w-md flex-col items-center">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src="https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=https%3A%2F%2Fgentleman-barber-kappa.vercel.app%2F"
-            alt="QR code per prenotare sul sito The Gentleman"
-            width={220}
-            height={220}
-            className="border-4 border-yellow-500 bg-white p-3"
-          />
+        <div className="mx-auto flex max-w-md flex-col items-center rounded-3xl border border-yellow-500/50 bg-zinc-950 px-6 py-10 shadow-[0_0_45px_rgba(234,179,8,0.12)]">
+          <div className="mb-7">
+            <p className="text-2xl font-extrabold tracking-[0.18em] text-yellow-500 sm:text-3xl">
+              THE GENTLEMAN
+            </p>
+            <p className="mt-2 text-[0.65rem] font-semibold uppercase tracking-[0.32em] text-yellow-100/70 sm:text-xs">
+              Premium Barber Experience
+            </p>
+          </div>
+
+          <div className="relative rounded-2xl border-2 border-yellow-500 bg-white p-3 shadow-[0_0_28px_rgba(234,179,8,0.2)]">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src="https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=https%3A%2F%2Fgentleman-barber-kappa.vercel.app%2F"
+              alt="QR code per prenotare sul sito The Gentleman"
+              width={240}
+              height={240}
+              className="block h-auto w-full max-w-60"
+            />
+
+            <div
+              aria-hidden="true"
+              className="pointer-events-none absolute left-1/2 top-1/2 flex h-10 w-10 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-lg border-2 border-yellow-500 bg-black text-xs font-black tracking-wider text-yellow-500 shadow-[0_0_0_3px_white]"
+            >
+              TG
+            </div>
+          </div>
+
           <p className="mt-6 text-lg text-gray-300">
             Scansiona il QR code per prenotare dal tuo smartphone
           </p>
