@@ -16,14 +16,11 @@ type Service = {
 type Operator = {
   id: string;
   name: string;
-  bio: string | null;
-  image_url: string | null;
-  specialties: string | null;
   active: boolean;
 };
 
-type OperatorServiceWithOperator = {
-  operators: Operator | Operator[] | null;
+type OperatorService = {
+  operator_id: string;
 };
 
 type ExistingAppointment = {
@@ -230,37 +227,63 @@ export default function BookingPage() {
 
       setLoadingOperators(true);
       setMessage("");
+      console.log("selectedServiceId", serviceId);
 
-      const { data, error } = await supabase
+      const {
+        data: operatorServices,
+        error: operatorServicesError,
+      } = await supabase
         .from("operator_services")
-        .select(
-          "operators!inner(id, name, bio, image_url, specialties, active)",
-        )
-        .eq("service_id", serviceId)
-        .eq("operators.active", true);
+        .select("operator_id")
+        .eq("service_id", serviceId);
 
       if (!active) {
         return;
       }
 
-      setLoadingOperators(false);
+      console.log("operator_services trovati", operatorServices);
 
-      if (error) {
-        setMessage(`Impossibile caricare gli operatori: ${error.message}`);
+      if (operatorServicesError) {
+        setLoadingOperators(false);
+        setMessage(
+          `Impossibile caricare gli operatori: ${operatorServicesError.message}`,
+        );
         return;
       }
 
-      const availableOperators = (
-        (data ?? []) as OperatorServiceWithOperator[]
-      )
-        .flatMap((association) =>
-          Array.isArray(association.operators)
-            ? association.operators
-            : association.operators
-              ? [association.operators]
-              : [],
-        )
-        .filter((operator) => operator.active)
+      const operatorIds = [
+        ...new Set(
+          ((operatorServices ?? []) as OperatorService[]).map(
+            (association) => association.operator_id,
+          ),
+        ),
+      ];
+      console.log("operatorIds", operatorIds);
+
+      if (operatorIds.length === 0) {
+        setLoadingOperators(false);
+        return;
+      }
+
+      const { data: loadedOperators, error: operatorsError } = await supabase
+        .from("operators")
+        .select("id, name, active")
+        .in("id", operatorIds)
+        .eq("active", true);
+
+      if (!active) {
+        return;
+      }
+
+      console.log("operators caricati", loadedOperators);
+      setLoadingOperators(false);
+
+      if (operatorsError) {
+        setMessage(`Impossibile caricare gli operatori: ${operatorsError.message}`);
+        return;
+      }
+
+      const availableOperators = ((loadedOperators ?? []) as Operator[])
         .sort((first, second) => first.name.localeCompare(second.name));
 
       setOperators(availableOperators);
@@ -662,36 +685,17 @@ export default function BookingPage() {
                           : "border-zinc-700 bg-zinc-900 hover:border-yellow-500/70"
                       }`}
                     >
-                      {operator.image_url ? (
-                        /* eslint-disable-next-line @next/next/no-img-element */
-                        <img
-                          src={operator.image_url}
-                          alt=""
-                          className="h-20 w-20 shrink-0 rounded-full border border-yellow-500/50 object-cover"
-                        />
-                      ) : (
-                        <div
-                          aria-hidden="true"
-                          className="flex h-20 w-20 shrink-0 items-center justify-center rounded-full border border-yellow-500/60 bg-black text-xl font-black text-yellow-500"
-                        >
-                          {getInitials(operator.name)}
-                        </div>
-                      )}
+                      <div
+                        aria-hidden="true"
+                        className="flex h-20 w-20 shrink-0 items-center justify-center rounded-full border border-yellow-500/60 bg-black text-xl font-black text-yellow-500"
+                      >
+                        {getInitials(operator.name)}
+                      </div>
 
                       <div className="min-w-0">
                         <h2 className="text-lg font-bold text-white">
                           {operator.name}
                         </h2>
-                        {operator.specialties && (
-                          <p className="mt-1 text-sm font-medium text-yellow-500">
-                            {operator.specialties}
-                          </p>
-                        )}
-                        {operator.bio && (
-                          <p className="mt-2 text-sm text-gray-400">
-                            {operator.bio}
-                          </p>
-                        )}
                       </div>
                     </button>
                   );
