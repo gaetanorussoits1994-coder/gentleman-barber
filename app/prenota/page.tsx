@@ -7,12 +7,10 @@ import { supabase } from "@/lib/supabase";
 type Service = {
   id: string;
   name: string;
-  description: string | null;
-  image_url: string | null;
   price: number | null;
   duration_minutes: number;
-  featured: boolean;
   active: boolean;
+  created_at: string;
 };
 
 type Operator = {
@@ -188,9 +186,7 @@ export default function BookingPage() {
     async function loadConfiguration() {
       const servicesResult = await supabase
         .from("services")
-        .select(
-          "id, name, description, image_url, price, duration_minutes, featured, active",
-        )
+        .select("id, name, price, duration_minutes, active, created_at")
         .eq("active", true)
         .order("name");
 
@@ -596,38 +592,18 @@ export default function BookingPage() {
                       }`}
                     >
                       <div className="relative flex h-36 items-center justify-center overflow-hidden bg-black">
-                        {service.image_url ? (
-                          /* eslint-disable-next-line @next/next/no-img-element */
-                          <img
-                            src={service.image_url}
-                            alt=""
-                            className="h-full w-full object-cover"
-                          />
-                        ) : (
-                          <div
-                            aria-hidden="true"
-                            className="flex h-20 w-20 items-center justify-center rounded-full border border-yellow-500/60 bg-zinc-950 text-4xl text-yellow-500"
-                          >
-                            ✂
-                          </div>
-                        )}
-
-                        {service.featured && (
-                          <span className="absolute right-3 top-3 rounded-full bg-yellow-500 px-3 py-1 text-xs font-bold text-black">
-                            Consigliato
-                          </span>
-                        )}
+                        <div
+                          aria-hidden="true"
+                          className="flex h-20 w-20 items-center justify-center rounded-full border border-yellow-500/60 bg-zinc-950 text-4xl text-yellow-500"
+                        >
+                          ✂
+                        </div>
                       </div>
 
                       <div className="p-4">
                         <h2 className="text-lg font-bold text-white">
                           {service.name}
                         </h2>
-                        {service.description && (
-                          <p className="mt-2 text-sm text-gray-400">
-                            {service.description}
-                          </p>
-                        )}
                         <div className="mt-4 flex items-center justify-between gap-3 text-sm">
                           <span className="text-gray-300">
                             {service.duration_minutes} minuti
