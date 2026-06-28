@@ -65,6 +65,14 @@ export default function Home() {
           </div>
         </div>
       </footer>
+
+      <Link
+        href="/prenota"
+        aria-label="Prenota ora il tuo appuntamento"
+        className="fixed bottom-5 right-5 z-50 rounded-full border border-yellow-300 bg-yellow-500 px-6 py-3 font-bold text-black shadow-[0_8px_30px_rgba(234,179,8,0.35)] transition hover:bg-yellow-400 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-yellow-500 sm:bottom-7 sm:right-7 sm:px-7 sm:py-4"
+      >
+        Prenota ora
+      </Link>
     </main>
   );
 }

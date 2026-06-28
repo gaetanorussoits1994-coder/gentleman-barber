@@ -7,20 +7,25 @@ import { supabase } from "@/lib/supabase";
 type Service = {
   id: string;
   name: string;
+  description: string | null;
+  image_url: string | null;
   price: number | null;
   duration_minutes: number;
+  featured: boolean;
   active: boolean;
 };
 
 type Operator = {
   id: string;
   name: string;
+  bio: string | null;
+  image_url: string | null;
+  specialties: string | null;
   active: boolean;
 };
 
-type OperatorService = {
-  operator_id: string;
-  service_id: string;
+type OperatorServiceWithOperator = {
+  operators: Operator | Operator[] | null;
 };
 
 type ExistingAppointment = {
@@ -35,6 +40,16 @@ type DailySlot = {
   available: boolean;
 };
 
+type BookingConfirmation = {
+  name: string;
+  service: string;
+  operator: string;
+  date: string;
+  time: string;
+  duration: number;
+  price: number | null;
+};
+
 const LEGACY_SERVICE_DURATIONS: Record<string, number> = {
   "Taglio Uomo": 45,
   Barba: 30,
@@ -44,7 +59,6 @@ const LEGACY_SERVICE_DURATIONS: Record<string, number> = {
 const CLOSED_DAY_MESSAGE = "Il locale è chiuso il lunedì.";
 const UNAVAILABLE_SLOT_MESSAGE =
   "Questo orario non è più disponibile. Scegli un altro slot.";
-const ADMIN_WHATSAPP = process.env.NEXT_PUBLIC_ADMIN_WHATSAPP?.replace(/\D/g, "");
 
 function timeToMinutes(time: string) {
   const [hours, minutes] = time.slice(0, 5).split(":").map(Number);
@@ -121,62 +135,64 @@ function getToday() {
   return `${year}-${month}-${day}`;
 }
 
-function buildWhatsAppUrl(details: {
-  name: string;
-  phone: string;
-  service: string;
-  operator: string;
-  date: string;
-  time: string;
-  notes: string;
-}) {
-  const message = `Nuova richiesta prenotazione:
-Nome: ${details.name}
-Telefono: ${details.phone}
-Servizio: ${details.service}
-Operatore: ${details.operator}
-Data: ${details.date}
-Ora: ${details.time}
-Note: ${details.notes || "Nessuna"}`;
-  const recipient = ADMIN_WHATSAPP ? `/${ADMIN_WHATSAPP}` : "";
+function formatPrice(price: number | null) {
+  if (price == null) {
+    return null;
+  }
 
-  return `https://wa.me${recipient}?text=${encodeURIComponent(message)}`;
+  return new Intl.NumberFormat("it-IT", {
+    style: "currency",
+    currency: "EUR",
+  }).format(price);
+}
+
+function getInitials(name: string) {
+  return name
+    .trim()
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((part) => part.charAt(0).toUpperCase())
+    .join("");
+}
+
+function formatItalianDate(date: string) {
+  const [year, month, day] = date.split("-").map(Number);
+
+  return new Intl.DateTimeFormat("it-IT", {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+  }).format(new Date(year, month - 1, day));
 }
 
 export default function BookingPage() {
   const [services, setServices] = useState<Service[]>([]);
   const [operators, setOperators] = useState<Operator[]>([]);
-  const [associations, setAssociations] = useState<OperatorService[]>([]);
   const [serviceId, setServiceId] = useState("");
   const [operatorId, setOperatorId] = useState("");
   const [date, setDate] = useState("");
   const [time, setTime] = useState("");
   const [appointments, setAppointments] = useState<ExistingAppointment[]>([]);
   const [loadingConfiguration, setLoadingConfiguration] = useState(true);
+  const [loadingOperators, setLoadingOperators] = useState(false);
   const [loadingSlots, setLoadingSlots] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState("");
+  const [confirmation, setConfirmation] =
+    useState<BookingConfirmation | null>(null);
 
   useEffect(() => {
     let active = true;
 
     async function loadConfiguration() {
-      const [servicesResult, operatorsResult, associationsResult] =
-        await Promise.all([
-          supabase
-            .from("services")
-            .select("id, name, price, duration_minutes, active")
-            .eq("active", true)
-            .order("name"),
-          supabase
-            .from("operators")
-            .select("id, name, active")
-            .eq("active", true)
-            .order("name"),
-          supabase
-            .from("operator_services")
-            .select("operator_id, service_id"),
-        ]);
+      const servicesResult = await supabase
+        .from("services")
+        .select(
+          "id, name, description, image_url, price, duration_minutes, featured, active",
+        )
+        .eq("active", true)
+        .order("name");
 
       if (!active) {
         return;
@@ -184,23 +200,14 @@ export default function BookingPage() {
 
       setLoadingConfiguration(false);
 
-      const configurationError =
-        servicesResult.error ||
-        operatorsResult.error ||
-        associationsResult.error;
-
-      if (configurationError) {
+      if (servicesResult.error) {
         setMessage(
-          `Configurazione non disponibile: ${configurationError.message}`,
+          `Configurazione non disponibile: ${servicesResult.error.message}`,
         );
         return;
       }
 
       setServices((servicesResult.data ?? []) as Service[]);
-      setOperators((operatorsResult.data ?? []) as Operator[]);
-      setAssociations(
-        (associationsResult.data ?? []) as OperatorService[],
-      );
     }
 
     void loadConfiguration();
@@ -209,6 +216,67 @@ export default function BookingPage() {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    let active = true;
+
+    async function loadOperatorsForService() {
+      setOperators([]);
+      setOperatorId("");
+      setDate("");
+      setTime("");
+      setAppointments([]);
+
+      if (!serviceId) {
+        setLoadingOperators(false);
+        return;
+      }
+
+      setLoadingOperators(true);
+      setMessage("");
+
+      const { data, error } = await supabase
+        .from("operator_services")
+        .select(
+          "operators!inner(id, name, bio, image_url, specialties, active)",
+        )
+        .eq("service_id", serviceId)
+        .eq("operators.active", true);
+
+      if (!active) {
+        return;
+      }
+
+      setLoadingOperators(false);
+
+      if (error) {
+        setMessage(`Impossibile caricare gli operatori: ${error.message}`);
+        return;
+      }
+
+      const availableOperators = (
+        (data ?? []) as OperatorServiceWithOperator[]
+      )
+        .flatMap((association) =>
+          Array.isArray(association.operators)
+            ? association.operators
+            : association.operators
+              ? [association.operators]
+              : [],
+        )
+        .filter((operator) => operator.active)
+        .sort((first, second) => first.name.localeCompare(second.name));
+
+      setOperators(availableOperators);
+      setOperatorId(availableOperators[0]?.id ?? "");
+    }
+
+    void loadOperatorsForService();
+
+    return () => {
+      active = false;
+    };
+  }, [serviceId]);
 
   useEffect(() => {
     let active = true;
@@ -256,13 +324,7 @@ export default function BookingPage() {
     services.find((service) => service.id === serviceId) ?? null;
   const selectedOperator =
     operators.find((operator) => operator.id === operatorId) ?? null;
-  const availableOperators = operators.filter((operator) =>
-    associations.some(
-      (association) =>
-        association.operator_id === operator.id &&
-        association.service_id === serviceId,
-    ),
-  );
+  const availableOperators = operators;
   const dailySlots = useMemo(
     () =>
       selectedService
@@ -310,7 +372,9 @@ export default function BookingPage() {
         .eq("operator_id", selectedOperator.id);
 
     if (availabilityError) {
-      setMessage("Impossibile verificare la disponibilità dello slot.");
+      setMessage(
+        `Impossibile verificare la disponibilità dello slot: ${availabilityError.message}`,
+      );
       setSubmitting(false);
       return;
     }
@@ -348,30 +412,29 @@ export default function BookingPage() {
     setSubmitting(false);
 
     if (error) {
-      setMessage(error.message || "Errore durante l'invio della prenotazione.");
+      setMessage(
+        `Impossibile salvare la prenotazione: ${
+          error.message || "errore sconosciuto"
+        }`,
+      );
       return;
     }
 
-    setMessage("Prenotazione inviata con successo!");
+    setConfirmation({
+      name,
+      service: selectedService.name,
+      operator: selectedOperator.name,
+      date,
+      time,
+      duration: selectedService.duration_minutes,
+      price: selectedService.price,
+    });
     form.reset();
     setServiceId("");
     setOperatorId("");
     setDate("");
     setTime("");
     setAppointments([]);
-    window.open(
-      buildWhatsAppUrl({
-        name,
-        phone,
-        service: selectedService.name,
-        operator: selectedOperator.name,
-        date,
-        time,
-        notes,
-      }),
-      "_blank",
-      "noopener,noreferrer",
-    );
   }
 
   return (
@@ -384,19 +447,98 @@ export default function BookingPage() {
           ← Torna alla home
         </Link>
 
-        <div className="my-10 text-center">
-          <p className="text-sm uppercase tracking-[0.35em] text-yellow-500">
-            The Gentleman
-          </p>
-          <h1 className="mt-3 text-4xl font-extrabold md:text-5xl">
-            Prenota il tuo appuntamento
-          </h1>
-          <p className="mt-4 text-gray-400">
-            Scegli servizio, operatore e uno degli orari disponibili.
-          </p>
-        </div>
+        {confirmation ? (
+          <section className="my-10 rounded-3xl border border-yellow-500/50 bg-zinc-950 p-6 text-center shadow-[0_0_45px_rgba(234,179,8,0.12)] sm:p-10">
+            <div
+              aria-hidden="true"
+              className="mx-auto flex h-16 w-16 items-center justify-center rounded-full border border-yellow-500 bg-yellow-500/10 text-3xl text-yellow-500"
+            >
+              ✓
+            </div>
+            <p className="mt-6 text-sm uppercase tracking-[0.35em] text-yellow-500">
+              The Gentleman
+            </p>
+            <h1 className="mt-3 text-4xl font-extrabold">
+              Richiesta inviata
+            </h1>
+            <p className="mx-auto mt-4 max-w-xl text-gray-400">
+              Richiesta inviata. Attendi conferma dal barber shop.
+            </p>
 
-        <form
+            <dl className="mx-auto mt-8 grid max-w-xl gap-4 rounded-2xl border border-zinc-800 bg-black p-5 text-left sm:grid-cols-2">
+              <div>
+                <dt className="text-xs uppercase tracking-wider text-gray-500">
+                  Cliente
+                </dt>
+                <dd className="mt-1 font-semibold">{confirmation.name}</dd>
+              </div>
+              <div>
+                <dt className="text-xs uppercase tracking-wider text-gray-500">
+                  Servizio
+                </dt>
+                <dd className="mt-1 font-semibold">{confirmation.service}</dd>
+              </div>
+              <div>
+                <dt className="text-xs uppercase tracking-wider text-gray-500">
+                  Operatore
+                </dt>
+                <dd className="mt-1 font-semibold">{confirmation.operator}</dd>
+              </div>
+              <div>
+                <dt className="text-xs uppercase tracking-wider text-gray-500">
+                  Data
+                </dt>
+                <dd className="mt-1 font-semibold capitalize">
+                  {formatItalianDate(confirmation.date)}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-xs uppercase tracking-wider text-gray-500">
+                  Ora
+                </dt>
+                <dd className="mt-1 font-semibold">{confirmation.time}</dd>
+              </div>
+              <div>
+                <dt className="text-xs uppercase tracking-wider text-gray-500">
+                  Durata e prezzo
+                </dt>
+                <dd className="mt-1 font-semibold">
+                  {confirmation.duration} minuti
+                  {confirmation.price != null
+                    ? ` · ${formatPrice(confirmation.price)}`
+                    : ""}
+                </dd>
+              </div>
+            </dl>
+
+            <div className="mt-8 flex flex-col justify-center gap-3 sm:flex-row">
+              <button
+                type="button"
+                onClick={() => {
+                  setConfirmation(null);
+                  setMessage("");
+                }}
+                className="rounded-xl border border-yellow-500 px-6 py-4 font-bold text-yellow-500 transition hover:bg-yellow-500 hover:text-black"
+              >
+                Nuova prenotazione
+              </button>
+            </div>
+          </section>
+        ) : (
+          <>
+            <div className="my-10 text-center">
+              <p className="text-sm uppercase tracking-[0.35em] text-yellow-500">
+                The Gentleman
+              </p>
+              <h1 className="mt-3 text-4xl font-extrabold md:text-5xl">
+                Prenota il tuo appuntamento
+              </h1>
+              <p className="mt-4 text-gray-400">
+                Scegli servizio, operatore e uno degli orari disponibili.
+              </p>
+            </div>
+
+            <form
           onSubmit={handleSubmit}
           className="grid gap-6 rounded-3xl border border-yellow-500/40 bg-zinc-950 p-6 shadow-[0_0_45px_rgba(234,179,8,0.1)] sm:p-9"
         >
@@ -423,65 +565,166 @@ export default function BookingPage() {
             </label>
           </div>
 
-          <div className="grid gap-5 sm:grid-cols-2">
-            <label className="grid gap-2">
-              <span className="font-semibold text-yellow-500">Servizio</span>
-              <select
-                name="service_id"
-                required
-                value={serviceId}
-                disabled={loadingConfiguration}
-                onChange={(event) => {
-                  setServiceId(event.target.value);
-                  setOperatorId("");
-                  setDate("");
-                  setTime("");
-                }}
-                className="rounded-xl border border-zinc-700 bg-white p-4 text-black disabled:bg-zinc-300"
-              >
-                <option value="">
-                  {loadingConfiguration
-                    ? "Caricamento..."
-                    : "Seleziona servizio"}
-                </option>
-                {services.map((service) => (
-                  <option key={service.id} value={service.id}>
-                    {service.name} — {service.duration_minutes} min
-                    {service.price != null ? ` — €${service.price}` : ""}
-                  </option>
-                ))}
-              </select>
-            </label>
+          <fieldset className="grid gap-3">
+            <legend className="font-semibold text-yellow-500">
+              Scegli il servizio
+            </legend>
 
-            <label className="grid gap-2">
-              <span className="font-semibold text-yellow-500">Operatore</span>
-              <select
-                name="operator_id"
-                required
-                value={operatorId}
-                disabled={!serviceId}
-                onChange={(event) => {
-                  setOperatorId(event.target.value);
-                  setDate("");
-                  setTime("");
-                }}
-                className="rounded-xl border border-zinc-700 bg-white p-4 text-black disabled:bg-zinc-300"
-              >
-                <option value="">
-                  {!serviceId
-                    ? "Seleziona prima il servizio"
-                    : availableOperators.length
-                      ? "Seleziona operatore"
-                      : "Nessun operatore disponibile"}
-                </option>
-                {availableOperators.map((operator) => (
-                  <option key={operator.id} value={operator.id}>
-                    {operator.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
+            {loadingConfiguration ? (
+              <p className="text-sm text-gray-400">Caricamento servizi...</p>
+            ) : (
+              <div className="grid gap-4 sm:grid-cols-2">
+                {services.map((service) => {
+                  const selected = service.id === serviceId;
+                  const price = formatPrice(service.price);
+
+                  return (
+                    <button
+                      key={service.id}
+                      type="button"
+                      aria-pressed={selected}
+                      onClick={() => {
+                        setServiceId(service.id);
+                        setOperatorId("");
+                        setDate("");
+                        setTime("");
+                      }}
+                      className={`overflow-hidden rounded-2xl border text-left transition ${
+                        selected
+                          ? "border-yellow-300 bg-yellow-500/15 ring-2 ring-yellow-500"
+                          : "border-zinc-700 bg-zinc-900 hover:border-yellow-500/70"
+                      }`}
+                    >
+                      <div className="relative flex h-36 items-center justify-center overflow-hidden bg-black">
+                        {service.image_url ? (
+                          /* eslint-disable-next-line @next/next/no-img-element */
+                          <img
+                            src={service.image_url}
+                            alt=""
+                            className="h-full w-full object-cover"
+                          />
+                        ) : (
+                          <div
+                            aria-hidden="true"
+                            className="flex h-20 w-20 items-center justify-center rounded-full border border-yellow-500/60 bg-zinc-950 text-4xl text-yellow-500"
+                          >
+                            ✂
+                          </div>
+                        )}
+
+                        {service.featured && (
+                          <span className="absolute right-3 top-3 rounded-full bg-yellow-500 px-3 py-1 text-xs font-bold text-black">
+                            Consigliato
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="p-4">
+                        <h2 className="text-lg font-bold text-white">
+                          {service.name}
+                        </h2>
+                        {service.description && (
+                          <p className="mt-2 text-sm text-gray-400">
+                            {service.description}
+                          </p>
+                        )}
+                        <div className="mt-4 flex items-center justify-between gap-3 text-sm">
+                          <span className="text-gray-300">
+                            {service.duration_minutes} minuti
+                          </span>
+                          {price && (
+                            <span className="font-bold text-yellow-500">
+                              {price}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </fieldset>
+
+          <input name="service_id" type="hidden" value={serviceId} />
+
+          <fieldset className="grid gap-3">
+            <legend className="font-semibold text-yellow-500">
+              Scegli l&apos;operatore
+            </legend>
+
+            {!serviceId ? (
+              <p className="text-sm text-gray-400">
+                Seleziona prima un servizio.
+              </p>
+            ) : loadingOperators ? (
+              <p className="text-sm text-gray-400">
+                Caricamento operatori...
+              </p>
+            ) : availableOperators.length === 0 ? (
+              <p className="text-sm text-gray-400">
+                Nessun operatore disponibile per questo servizio.
+              </p>
+            ) : (
+              <div className="grid gap-4 sm:grid-cols-2">
+                {availableOperators.map((operator) => {
+                  const selected = operator.id === operatorId;
+
+                  return (
+                    <button
+                      key={operator.id}
+                      type="button"
+                      aria-pressed={selected}
+                      onClick={() => {
+                        setOperatorId(operator.id);
+                        setDate("");
+                        setTime("");
+                      }}
+                      className={`flex items-center gap-4 rounded-2xl border p-4 text-left transition ${
+                        selected
+                          ? "border-yellow-300 bg-yellow-500/15 ring-2 ring-yellow-500"
+                          : "border-zinc-700 bg-zinc-900 hover:border-yellow-500/70"
+                      }`}
+                    >
+                      {operator.image_url ? (
+                        /* eslint-disable-next-line @next/next/no-img-element */
+                        <img
+                          src={operator.image_url}
+                          alt=""
+                          className="h-20 w-20 shrink-0 rounded-full border border-yellow-500/50 object-cover"
+                        />
+                      ) : (
+                        <div
+                          aria-hidden="true"
+                          className="flex h-20 w-20 shrink-0 items-center justify-center rounded-full border border-yellow-500/60 bg-black text-xl font-black text-yellow-500"
+                        >
+                          {getInitials(operator.name)}
+                        </div>
+                      )}
+
+                      <div className="min-w-0">
+                        <h2 className="text-lg font-bold text-white">
+                          {operator.name}
+                        </h2>
+                        {operator.specialties && (
+                          <p className="mt-1 text-sm font-medium text-yellow-500">
+                            {operator.specialties}
+                          </p>
+                        )}
+                        {operator.bio && (
+                          <p className="mt-2 text-sm text-gray-400">
+                            {operator.bio}
+                          </p>
+                        )}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </fieldset>
+
+          <input name="operator_id" type="hidden" value={operatorId} />
 
           <label className="grid gap-2">
             <span className="font-semibold text-yellow-500">Data</span>
@@ -562,7 +805,13 @@ export default function BookingPage() {
           </label>
 
           <button
-            disabled={submitting || loadingSlots || !time}
+            disabled={
+              submitting ||
+              loadingSlots ||
+              loadingOperators ||
+              !operatorId ||
+              !time
+            }
             className="rounded-xl bg-yellow-500 p-4 font-bold text-black transition hover:bg-yellow-400 disabled:cursor-not-allowed disabled:opacity-60"
           >
             {submitting ? "Invio..." : "Invia Prenotazione"}
@@ -571,7 +820,9 @@ export default function BookingPage() {
           {message && (
             <p className="text-center font-medium text-yellow-500">{message}</p>
           )}
-        </form>
+            </form>
+          </>
+        )}
       </div>
     </main>
   );
