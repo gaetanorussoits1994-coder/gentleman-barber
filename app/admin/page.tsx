@@ -6,7 +6,7 @@ import { supabase } from "@/lib/supabase";
 
 type Appointment = {
   id: string | number;
-  created_at?: string;
+  created_at?: string | null;
   name: string;
   phone: string;
   service: string;
@@ -51,6 +51,39 @@ type OperatorService = {
   service_id: string;
 };
 
+const APPOINTMENTS_REFRESH_INTERVAL_MS = 5000;
+const DUPLICATE_SERVICE_MESSAGE = "Esiste già un servizio con questo nome.";
+const LINKED_SERVICE_MESSAGE =
+  "Impossibile eliminare: servizio collegato a prenotazioni esistenti.";
+
+function normalizeServiceName(name: string) {
+  return name.trim().toLocaleLowerCase("it-IT");
+}
+
+function sortServices(items: Service[]) {
+  return [...items].sort(
+    (first, second) =>
+      Number(second.active) - Number(first.active) ||
+      first.name.localeCompare(second.name, "it-IT", {
+        sensitivity: "base",
+      }),
+  );
+}
+
+function serviceNameAlreadyExists(
+  services: Service[],
+  name: string,
+  excludedServiceId?: string,
+) {
+  const normalizedName = normalizeServiceName(name);
+
+  return services.some(
+    (service) =>
+      service.id !== excludedServiceId &&
+      normalizeServiceName(service.name) === normalizedName,
+  );
+}
+
 function formatPhoneForWhatsApp(phone: string) {
   let formattedPhone = phone.replace(/\s/g, "").replace(/\+/g, "");
 
@@ -75,15 +108,16 @@ Operatore: ${operatorName}
 Data: ${appointment.date}
 Ora: ${appointment.time}
 
-Ti aspettiamo.`
-      : `Ciao ${appointment.name}, purtroppo l'orario richiesto non è disponibile.
+Grazie per la prenotazione, ti aspettiamo.`
+      : `Ciao ${appointment.name}, purtroppo l’orario richiesto non è disponibile.
 
 Servizio: ${appointment.service}
 Operatore: ${operatorName}
 Data: ${appointment.date}
 Ora: ${appointment.time}
 
-Rispondici su WhatsApp per scegliere un altro orario.`;
+Nella fascia oraria da te scelta siamo già occupati.
+Ti invitiamo a effettuare una nuova prenotazione dalla home, scegliendo uno degli slot disponibili.`;
 
   return `https://wa.me/${formatPhoneForWhatsApp(appointment.phone)}?text=${encodeURIComponent(message)}`;
 }
@@ -114,6 +148,20 @@ function getToday() {
   return `${year}-${month}-${day}`;
 }
 
+function getAdminTodayString() {
+  const parts = new Intl.DateTimeFormat("en", {
+    timeZone: "Europe/Rome",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const year = parts.find((part) => part.type === "year")?.value;
+  const month = parts.find((part) => part.type === "month")?.value;
+  const day = parts.find((part) => part.type === "day")?.value;
+
+  return `${year}-${month}-${day}`;
+}
+
 function formatPrice(price: number | null) {
   if (price == null) {
     return "—";
@@ -125,6 +173,33 @@ function formatPrice(price: number | null) {
   }).format(price);
 }
 
+function formatRequestDate(createdAt?: string | null) {
+  if (!createdAt) {
+    return "Data richiesta non disponibile";
+  }
+
+  const timestamp = new Date(createdAt);
+
+  if (Number.isNaN(timestamp.getTime())) {
+    return "Data richiesta non disponibile";
+  }
+
+  const date = timestamp.toLocaleDateString("it-IT", {
+    timeZone: "Europe/Rome",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  });
+  const time = timestamp.toLocaleTimeString("it-IT", {
+    timeZone: "Europe/Rome",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+
+  return `Richiesta inviata il ${date} alle ${time}`;
+}
+
 function escapeCsvValue(value: unknown) {
   const text = String(value ?? "");
 
@@ -132,7 +207,7 @@ function escapeCsvValue(value: unknown) {
 }
 
 function downloadCsv(filename: string, rows: unknown[][]) {
-  const csv = rows.map((row) => row.map(escapeCsvValue).join(",")).join("\r\n");
+  const csv = rows.map((row) => row.map(escapeCsvValue).join(";")).join("\r\n");
   const blob = new Blob([`\uFEFF${csv}`], {
     type: "text/csv;charset=utf-8",
   });
@@ -144,7 +219,25 @@ function downloadCsv(filename: string, rows: unknown[][]) {
   document.body.appendChild(link);
   link.click();
   link.remove();
-  URL.revokeObjectURL(url);
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+function formatCsvTimestamp(timestamp?: string | null) {
+  if (!timestamp) {
+    return "";
+  }
+
+  const date = new Date(timestamp);
+
+  if (Number.isNaN(date.getTime())) {
+    return timestamp;
+  }
+
+  return date.toLocaleString("it-IT", {
+    timeZone: "Europe/Rome",
+    dateStyle: "short",
+    timeStyle: "short",
+  });
 }
 
 async function fetchAllAppointments() {
@@ -154,7 +247,9 @@ async function fetchAllAppointments() {
   for (let from = 0; ; from += pageSize) {
     const { data, error } = await supabase
       .from("appointments")
-      .select("*")
+      .select(
+        "id, created_at, name, phone, service, service_id, operator_id, date, time, notes, status",
+      )
       .order("created_at", { ascending: false })
       .range(from, from + pageSize - 1);
 
@@ -202,9 +297,9 @@ export default function AdminPage() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [selectedDate, setSelectedDate] = useState(getToday);
+  const [selectedDate, setSelectedDate] = useState(getAdminTodayString);
   const [appointmentFilter, setAppointmentFilter] =
-    useState<AppointmentFilter>("today");
+    useState<AppointmentFilter>("all");
   const [archiving, setArchiving] = useState(false);
   const [exportingArchive, setExportingArchive] = useState(false);
   const [associationOperatorId, setAssociationOperatorId] = useState("");
@@ -213,9 +308,48 @@ export default function AdminPage() {
     null,
   );
   const [editingServiceId, setEditingServiceId] = useState<string | null>(null);
+  const [serviceToDelete, setServiceToDelete] = useState<Service | null>(null);
+  const [deletingServiceId, setDeletingServiceId] = useState<string | null>(
+    null,
+  );
 
   useEffect(() => {
     let active = true;
+    let dashboardReady = false;
+    let refreshInterval: number | null = null;
+
+    async function refreshAppointments() {
+      const appointmentsResult = await fetchAllAppointments();
+
+      if (!active) {
+        return;
+      }
+
+      if (appointmentsResult.error) {
+        console.error(
+          "Errore durante l'aggiornamento delle prenotazioni:",
+          appointmentsResult.error,
+        );
+        setError(
+          `Impossibile aggiornare le prenotazioni: ${appointmentsResult.error.message}`,
+        );
+        return;
+      }
+
+      setAppointments(appointmentsResult.data ?? []);
+    }
+
+    function refreshAppointmentsWhenVisible() {
+      if (dashboardReady && document.visibilityState === "visible") {
+        void refreshAppointments();
+      }
+    }
+
+    function refreshAppointmentsOnFocus() {
+      if (dashboardReady) {
+        void refreshAppointments();
+      }
+    }
 
     async function loadDashboard() {
       const {
@@ -247,7 +381,7 @@ export default function AdminPage() {
 
       setAppointments((appointmentsResult.data ?? []) as Appointment[]);
       setOperators((operatorsResult.data ?? []) as Operator[]);
-      setServices((servicesResult.data ?? []) as Service[]);
+      setServices(sortServices((servicesResult.data ?? []) as Service[]));
       setAssociations(
         (associationsResult.data ?? []) as OperatorService[],
       );
@@ -257,11 +391,26 @@ export default function AdminPage() {
         operatorsResult.error ||
         servicesResult.error ||
         associationsResult.error;
+
+      if (loadError) {
+        console.error("Errore durante il caricamento della dashboard:", loadError);
+      }
+
       setError(loadError?.message ?? null);
       setLoading(false);
+      dashboardReady = true;
+      refreshInterval = window.setInterval(
+        () => void refreshAppointments(),
+        APPOINTMENTS_REFRESH_INTERVAL_MS,
+      );
     }
 
     void loadDashboard();
+    document.addEventListener(
+      "visibilitychange",
+      refreshAppointmentsWhenVisible,
+    );
+    window.addEventListener("focus", refreshAppointmentsOnFocus);
 
     const realtimeChannel = supabase
       .channel("appointments-admin-dashboard")
@@ -304,7 +453,21 @@ export default function AdminPage() {
           );
         },
       )
-      .subscribe();
+      .subscribe((status, channelError) => {
+        if (status === "SUBSCRIBED") {
+          if (dashboardReady) {
+            void refreshAppointments();
+          }
+          return;
+        }
+
+        if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+          console.warn(
+            "Realtime prenotazioni non disponibile; resta attivo l'aggiornamento periodico.",
+            channelError,
+          );
+        }
+      });
 
     const {
       data: { subscription },
@@ -316,6 +479,14 @@ export default function AdminPage() {
 
     return () => {
       active = false;
+      if (refreshInterval) {
+        window.clearInterval(refreshInterval);
+      }
+      document.removeEventListener(
+        "visibilitychange",
+        refreshAppointmentsWhenVisible,
+      );
+      window.removeEventListener("focus", refreshAppointmentsOnFocus);
       subscription.unsubscribe();
       void supabase.removeChannel(realtimeChannel);
     };
@@ -466,10 +637,25 @@ export default function AdminPage() {
     const name = String(formData.get("service_name") ?? "").trim();
     const duration = Number(formData.get("duration_minutes"));
     const priceValue = String(formData.get("price") ?? "").trim();
-    const price = priceValue ? Number(priceValue) : null;
+    const price = Number(priceValue);
 
-    if (!name || !Number.isInteger(duration) || duration <= 0) {
-      showError("Inserisci nome e durata valida per il servizio.");
+    if (!name) {
+      showError("Il nome del servizio è obbligatorio.");
+      return;
+    }
+
+    if (!priceValue || !Number.isFinite(price) || price <= 0) {
+      showError("Il prezzo deve essere maggiore di 0.");
+      return;
+    }
+
+    if (!Number.isInteger(duration) || duration <= 0) {
+      showError("La durata deve essere maggiore di 0.");
+      return;
+    }
+
+    if (serviceNameAlreadyExists(services, name)) {
+      showError(DUPLICATE_SERVICE_MESSAGE);
       return;
     }
 
@@ -485,14 +671,16 @@ export default function AdminPage() {
       .single();
 
     if (insertError) {
-      showError(insertError.message);
+      showError(
+        insertError.code === "23505"
+          ? DUPLICATE_SERVICE_MESSAGE
+          : insertError.message,
+      );
       return;
     }
 
     setServices((current) =>
-      [...current, data as Service].sort((a, b) =>
-        a.name.localeCompare(b.name),
-      ),
+      sortServices([...current, data as Service]),
     );
     form.reset();
     showNotice("Servizio aggiunto.");
@@ -510,8 +698,10 @@ export default function AdminPage() {
     }
 
     setServices((current) =>
-      current.map((item) =>
-        item.id === service.id ? { ...item, active: !item.active } : item,
+      sortServices(
+        current.map((item) =>
+          item.id === service.id ? { ...item, active: !item.active } : item,
+        ),
       ),
     );
     showNotice(`Servizio ${service.active ? "disattivato" : "attivato"}.`);
@@ -526,7 +716,7 @@ export default function AdminPage() {
     const name = String(formData.get("name") ?? "").trim();
     const duration = Number(formData.get("duration_minutes"));
     const priceValue = String(formData.get("price") ?? "").trim();
-    const price = priceValue ? Number(priceValue) : null;
+    const price = Number(priceValue);
     const updates = {
       name,
       description:
@@ -538,13 +728,23 @@ export default function AdminPage() {
       active: formData.get("active") === "true",
     };
 
-    if (!name || !Number.isInteger(duration) || duration <= 0) {
-      showError("Inserisci nome e durata valida per il servizio.");
+    if (!name) {
+      showError("Il nome del servizio è obbligatorio.");
       return;
     }
 
-    if (price != null && (!Number.isFinite(price) || price < 0)) {
-      showError("Inserisci un prezzo valido.");
+    if (!priceValue || !Number.isFinite(price) || price <= 0) {
+      showError("Il prezzo deve essere maggiore di 0.");
+      return;
+    }
+
+    if (!Number.isInteger(duration) || duration <= 0) {
+      showError("La durata deve essere maggiore di 0.");
+      return;
+    }
+
+    if (serviceNameAlreadyExists(services, name, service.id)) {
+      showError(DUPLICATE_SERVICE_MESSAGE);
       return;
     }
 
@@ -556,17 +756,74 @@ export default function AdminPage() {
       .single();
 
     if (updateError) {
-      showError(updateError.message);
+      showError(
+        updateError.code === "23505"
+          ? DUPLICATE_SERVICE_MESSAGE
+          : updateError.message,
+      );
       return;
     }
 
     setServices((current) =>
-      current
-        .map((item) => (item.id === service.id ? (data as Service) : item))
-        .sort((a, b) => a.name.localeCompare(b.name)),
+      sortServices(
+        current.map((item) =>
+          item.id === service.id ? (data as Service) : item,
+        ),
+      ),
     );
     setEditingServiceId(null);
     showNotice("Servizio aggiornato.");
+  }
+
+  async function handleDeleteService() {
+    if (!serviceToDelete) {
+      return;
+    }
+
+    setDeletingServiceId(serviceToDelete.id);
+    const { data, error: deleteError } = await supabase
+      .from("services")
+      .delete()
+      .eq("id", serviceToDelete.id)
+      .select("id")
+      .maybeSingle();
+    setDeletingServiceId(null);
+
+    if (deleteError) {
+      showError(
+        deleteError.code === "23503"
+          ? LINKED_SERVICE_MESSAGE
+          : deleteError.message,
+      );
+      setServiceToDelete(null);
+      return;
+    }
+
+    if (!data) {
+      showError("Impossibile eliminare il servizio.");
+      setServiceToDelete(null);
+      return;
+    }
+
+    setServices((current) =>
+      current.filter((service) => service.id !== serviceToDelete.id),
+    );
+    setAssociations((current) =>
+      current.filter(
+        (association) => association.service_id !== serviceToDelete.id,
+      ),
+    );
+
+    if (associationServiceId === serviceToDelete.id) {
+      setAssociationServiceId("");
+    }
+
+    if (editingServiceId === serviceToDelete.id) {
+      setEditingServiceId(null);
+    }
+
+    setServiceToDelete(null);
+    showNotice("Servizio eliminato.");
   }
 
   async function handleAssociate(event: React.FormEvent<HTMLFormElement>) {
@@ -719,7 +976,9 @@ export default function AdminPage() {
     setAppointments(refreshedAppointments.data ?? []);
     const archivedCount = Number(data ?? 0);
     showNotice(
-      `${archivedCount} prenotazion${archivedCount === 1 ? "e archiviata" : "i archiviate"}.`,
+      archivedCount === 0
+        ? "Nessuna prenotazione abbastanza vecchia da archiviare."
+        : `${archivedCount} prenotazion${archivedCount === 1 ? "e archiviata" : "i archiviate"}.`,
     );
   }
 
@@ -729,13 +988,13 @@ export default function AdminPage() {
       "Telefono",
       "Servizio",
       "Operatore",
-      "Durata",
-      "Prezzo",
-      "Data",
-      "Ora",
+      "Data appuntamento",
+      "Ora appuntamento",
+      "Durata (minuti)",
+      "Prezzo (EUR)",
       "Stato",
       "Note",
-      "Creato il",
+      "Data e ora invio richiesta",
     ];
 
     if (includeArchivedAt) {
@@ -756,17 +1015,21 @@ export default function AdminPage() {
           appointment.phone,
           service?.name ?? appointment.service,
           operator?.name ?? "Non assegnato",
-          service ? service.duration_minutes : "",
-          service?.price ?? "",
           appointment.date,
           appointment.time,
+          service ? service.duration_minutes : "",
+          service?.price ?? "",
           getAppointmentStatus(appointment.status),
           appointment.notes ?? "",
-          appointment.created_at ?? "",
+          formatCsvTimestamp(appointment.created_at),
         ];
 
         if (includeArchivedAt) {
-          row.push((appointment as ArchivedAppointment).archived_at);
+          row.push(
+            formatCsvTimestamp(
+              (appointment as ArchivedAppointment).archived_at,
+            ),
+          );
         }
 
         return row;
@@ -775,9 +1038,19 @@ export default function AdminPage() {
   }
 
   function handleDownloadCsv() {
+    if (filteredAppointments.length === 0) {
+      showNotice("Nessuna prenotazione visualizzata da esportare.");
+      return;
+    }
+
     downloadCsv(
       `prenotazioni-the-gentleman-${getToday()}.csv`,
       createCsvRows(filteredAppointments),
+    );
+    showNotice(
+      `CSV creato con ${filteredAppointments.length} prenotazion${
+        filteredAppointments.length === 1 ? "e" : "i"
+      }.`,
     );
   }
 
@@ -793,13 +1066,25 @@ export default function AdminPage() {
       return;
     }
 
+    const archivedAppointments = archiveResult.data ?? [];
+
+    if (archivedAppointments.length === 0) {
+      showNotice("L'archivio non contiene prenotazioni da esportare.");
+      return;
+    }
+
     downloadCsv(
       "archivio-prenotazioni-the-gentleman.csv",
-      createCsvRows(archiveResult.data ?? [], true),
+      createCsvRows(archivedAppointments, true),
+    );
+    showNotice(
+      `CSV archivio creato con ${archivedAppointments.length} prenotazion${
+        archivedAppointments.length === 1 ? "e" : "i"
+      }.`,
     );
   }
 
-  const today = getToday();
+  const todayString = getAdminTodayString();
   const filteredAppointments = appointments
     .filter((appointment) => {
       if (appointmentFilter === "today") {
@@ -807,20 +1092,32 @@ export default function AdminPage() {
       }
 
       if (appointmentFilter === "future") {
-        return appointment.date >= today;
+        return appointment.date >= todayString;
       }
 
       if (appointmentFilter === "past") {
-        return appointment.date < today;
+        return appointment.date < todayString;
       }
 
       return true;
     })
-    .sort(
-      (first, second) =>
+    .sort((first, second) => {
+      if (appointmentFilter === "all") {
+        const firstCreatedAt = first.created_at
+          ? Date.parse(first.created_at)
+          : 0;
+        const secondCreatedAt = second.created_at
+          ? Date.parse(second.created_at)
+          : 0;
+
+        return secondCreatedAt - firstCreatedAt;
+      }
+
+      return (
         first.date.localeCompare(second.date) ||
-        first.time.localeCompare(second.time),
-    );
+        first.time.localeCompare(second.time)
+      );
+    });
 
   if (loading) {
     return (
@@ -996,20 +1293,21 @@ export default function AdminPage() {
               placeholder="Nome servizio"
               className="rounded-lg bg-white p-3 text-black"
             />
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid gap-2 sm:grid-cols-2">
               <input
                 name="price"
                 type="number"
-                min="0"
+                min="0.01"
                 step="0.01"
+                required
                 placeholder="Prezzo €"
                 className="rounded-lg bg-white p-3 text-black"
               />
               <input
                 name="duration_minutes"
                 type="number"
-                min="15"
-                step="15"
+                min="1"
+                step="1"
                 required
                 placeholder="Durata minuti"
                 className="rounded-lg bg-white p-3 text-black"
@@ -1048,12 +1346,13 @@ export default function AdminPage() {
                     placeholder="URL immagine facoltativo"
                     className="rounded-lg bg-white p-3 text-black"
                   />
-                  <div className="grid grid-cols-2 gap-2">
+                  <div className="grid gap-2 sm:grid-cols-2">
                     <input
                       name="price"
                       type="number"
-                      min="0"
+                      min="0.01"
                       step="0.01"
+                      required
                       defaultValue={service.price ?? ""}
                       placeholder="Prezzo €"
                       className="rounded-lg bg-white p-3 text-black"
@@ -1068,7 +1367,7 @@ export default function AdminPage() {
                       className="rounded-lg bg-white p-3 text-black"
                     />
                   </div>
-                  <div className="grid grid-cols-2 gap-2">
+                  <div className="grid gap-2 sm:grid-cols-2">
                     <select
                       name="featured"
                       defaultValue={String(service.featured)}
@@ -1086,14 +1385,14 @@ export default function AdminPage() {
                       <option value="false">Non attivo</option>
                     </select>
                   </div>
-                  <div className="flex gap-2">
-                    <button className="flex-1 rounded-lg bg-yellow-500 p-3 font-bold text-black">
+                  <div className="flex flex-col gap-2 sm:flex-row">
+                    <button className="min-h-11 flex-1 rounded-lg bg-yellow-500 p-3 font-bold text-black">
                       Salva
                     </button>
                     <button
                       type="button"
                       onClick={() => setEditingServiceId(null)}
-                      className="rounded-lg border border-zinc-600 px-4 text-gray-300"
+                      className="min-h-11 rounded-lg border border-zinc-600 px-4 py-3 text-gray-300"
                     >
                       Annulla
                     </button>
@@ -1104,7 +1403,7 @@ export default function AdminPage() {
                   key={service.id}
                   className="rounded-lg bg-zinc-900 p-3"
                 >
-                  <div className="flex items-start justify-between gap-3">
+                  <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
                     <div className="min-w-0">
                       <p className="font-semibold">
                         {service.name}
@@ -1130,20 +1429,27 @@ export default function AdminPage() {
                         {service.active ? "Attivo" : "Disattivato"}
                       </p>
                     </div>
-                    <div className="flex flex-col gap-2">
+                    <div className="grid w-full gap-2 sm:w-auto sm:min-w-36">
                       <button
                         type="button"
                         onClick={() => setEditingServiceId(service.id)}
-                        className="rounded-lg bg-yellow-500 px-3 py-2 text-sm font-bold text-black"
+                        className="min-h-11 rounded-lg bg-yellow-500 px-4 py-3 text-sm font-bold text-black"
                       >
                         Modifica
                       </button>
                       <button
                         type="button"
                         onClick={() => handleToggleService(service)}
-                        className="rounded-lg border border-yellow-500 px-3 py-2 text-sm text-yellow-500"
+                        className="min-h-11 rounded-lg border border-yellow-500 px-4 py-3 text-sm font-semibold text-yellow-500"
                       >
                         {service.active ? "Disattiva" : "Attiva"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setServiceToDelete(service)}
+                        className="min-h-11 rounded-lg border border-red-500 px-4 py-3 text-sm font-semibold text-red-400"
+                      >
+                        Elimina
                       </button>
                     </div>
                   </div>
@@ -1152,6 +1458,51 @@ export default function AdminPage() {
             )}
           </div>
         </section>
+
+        {serviceToDelete && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-service-title"
+            aria-describedby="delete-service-description"
+          >
+            <div className="w-full max-w-md rounded-2xl border border-zinc-700 bg-zinc-950 p-6 shadow-2xl">
+              <h2
+                id="delete-service-title"
+                className="text-2xl font-bold text-white"
+              >
+                Eliminare questo servizio?
+              </h2>
+              <p
+                id="delete-service-description"
+                className="mt-3 text-gray-400"
+              >
+                Questa operazione è irreversibile.
+              </p>
+              <div className="mt-6 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+                <button
+                  type="button"
+                  onClick={() => setServiceToDelete(null)}
+                  disabled={deletingServiceId === serviceToDelete.id}
+                  className="min-h-11 rounded-lg border border-zinc-600 px-5 py-3 font-semibold text-gray-300 disabled:opacity-50"
+                >
+                  Annulla
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleDeleteService()}
+                  disabled={deletingServiceId === serviceToDelete.id}
+                  className="min-h-11 rounded-lg bg-red-500 px-5 py-3 font-bold text-black disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {deletingServiceId === serviceToDelete.id
+                    ? "Eliminazione..."
+                    : "Elimina"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         <section className="rounded-2xl border border-zinc-800 bg-zinc-950 p-5">
           <h2 className="mb-5 text-2xl font-bold text-yellow-500">
@@ -1358,6 +1709,9 @@ export default function AdminPage() {
                       <p className="font-semibold">{appointment.name}</p>
                       <p className="text-sm text-gray-400">
                         {appointment.phone}
+                      </p>
+                      <p className="mt-1 text-xs text-gray-500">
+                        {formatRequestDate(appointment.created_at)}
                       </p>
                     </td>
                     <td className="p-4">{service?.name ?? appointment.service}</td>

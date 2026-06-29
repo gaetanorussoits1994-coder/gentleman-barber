@@ -33,6 +33,7 @@ type ExistingAppointment = {
 type DailySlot = {
   time: string;
   available: boolean;
+  unavailableReason: "occupied" | "past" | null;
 };
 
 type BookingConfirmation = {
@@ -51,7 +52,15 @@ const LEGACY_SERVICE_DURATIONS: Record<string, number> = {
   "Taglio + Barba": 60,
 };
 
-const CLOSED_DAY_MESSAGE = "Il locale è chiuso il lunedì.";
+const SHOP_TIME_ZONE = "Europe/Rome";
+const CLOSED_WEEKDAY = 1;
+const OPENING_SHIFTS = [
+  [8 * 60, 12 * 60 + 30],
+  [13 * 60 + 30, 18 * 60],
+] as const;
+const CLOSED_DAY_MESSAGE = "Il negozio è chiuso nel giorno selezionato.";
+const TODAY_CLOSED_MESSAGE =
+  "Il negozio è chiuso in questo momento. Per oggi non è più possibile prenotare. Puoi scegliere un altro giorno disponibile.";
 const UNAVAILABLE_SLOT_MESSAGE =
   "Questo orario non è più disponibile. Scegli un altro slot.";
 
@@ -66,9 +75,59 @@ function minutesToTime(minutes: number) {
   ).padStart(2, "0")}`;
 }
 
-function isMonday(date: string) {
+function isClosedDay(date: string) {
   const [year, month, day] = date.split("-").map(Number);
-  return new Date(year, month - 1, day).getDay() === 1;
+  return new Date(year, month - 1, day).getDay() === CLOSED_WEEKDAY;
+}
+
+function getShopDateTime(now = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: SHOP_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(now);
+  const values = Object.fromEntries(
+    parts.map((part) => [part.type, part.value]),
+  );
+
+  return {
+    date: `${values.year}-${values.month}-${values.day}`,
+    minutes: Number(values.hour) * 60 + Number(values.minute),
+  };
+}
+
+function isShopOpenForBookingDateTime(
+  date: string,
+  time: string,
+  now = new Date(),
+) {
+  if (!date || !time || isClosedDay(date)) {
+    return false;
+  }
+
+  const shopNow = getShopDateTime(now);
+  const slotStart = timeToMinutes(time);
+  const isInsideOpeningHours = OPENING_SHIFTS.some(
+    ([shiftStart, shiftEnd]) =>
+      slotStart >= shiftStart && slotStart < shiftEnd,
+  );
+
+  if (!isInsideOpeningHours || date < shopNow.date) {
+    return false;
+  }
+
+  return date > shopNow.date || slotStart > shopNow.minutes;
+}
+
+function isTodayAfterClosing(date: string, now = new Date()) {
+  const shopNow = getShopDateTime(now);
+  const closingTime = OPENING_SHIFTS.at(-1)?.[1] ?? 0;
+
+  return date === shopNow.date && shopNow.minutes >= closingTime;
 }
 
 function getAppointmentDuration(
@@ -87,19 +146,22 @@ function getAppointmentDuration(
 }
 
 function createDailySlots(
+  date: string,
   duration: number,
   appointments: ExistingAppointment[],
   services: Service[],
+  now = new Date(),
 ): DailySlot[] {
-  const shifts = [
-    [8 * 60, 12 * 60 + 30],
-    [13 * 60 + 30, 18 * 60],
-  ];
-
-  return shifts.flatMap(([shiftStart, shiftEnd]) => {
+  return OPENING_SHIFTS.flatMap(([shiftStart, shiftEnd]) => {
     const slots: DailySlot[] = [];
 
     for (let start = shiftStart; start + duration <= shiftEnd; start += 15) {
+      const slotTime = minutesToTime(start);
+      const isBookableDateTime = isShopOpenForBookingDateTime(
+        date,
+        slotTime,
+        now,
+      );
       const occupied = appointments.some((appointment) => {
         if (appointment.status === "rejected") {
           return false;
@@ -113,8 +175,13 @@ function createDailySlots(
       });
 
       slots.push({
-        time: minutesToTime(start),
-        available: !occupied,
+        time: slotTime,
+        available: !occupied && isBookableDateTime,
+        unavailableReason: occupied
+          ? "occupied"
+          : isBookableDateTime
+            ? null
+            : "past",
       });
     }
 
@@ -123,11 +190,7 @@ function createDailySlots(
 }
 
 function getToday() {
-  const today = new Date();
-  const year = today.getFullYear();
-  const month = String(today.getMonth() + 1).padStart(2, "0");
-  const day = String(today.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
+  return getShopDateTime().date;
 }
 
 function formatPrice(price: number | null) {
@@ -176,6 +239,16 @@ export default function BookingPage() {
   const [message, setMessage] = useState("");
   const [confirmation, setConfirmation] =
     useState<BookingConfirmation | null>(null);
+  const [bookingClock, setBookingClock] = useState(() => new Date());
+
+  useEffect(() => {
+    const interval = window.setInterval(
+      () => setBookingClock(new Date()),
+      30_000,
+    );
+
+    return () => window.clearInterval(interval);
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -304,8 +377,18 @@ export default function BookingPage() {
       setTime("");
       setAppointments([]);
 
-      if (!operatorId || !date || isMonday(date)) {
-        setMessage(date && isMonday(date) ? CLOSED_DAY_MESSAGE : "");
+      if (!operatorId || !date || isClosedDay(date)) {
+        setMessage(date && isClosedDay(date) ? CLOSED_DAY_MESSAGE : "");
+        return;
+      }
+
+      if (date < getToday()) {
+        setMessage("La data selezionata non è più disponibile.");
+        return;
+      }
+
+      if (isTodayAfterClosing(date)) {
+        setMessage(TODAY_CLOSED_MESSAGE);
         return;
       }
 
@@ -348,12 +431,14 @@ export default function BookingPage() {
     () =>
       selectedService
         ? createDailySlots(
+            date,
             selectedService.duration_minutes,
             appointments,
             services,
+            bookingClock,
           )
         : [],
-    [appointments, selectedService, services],
+    [appointments, bookingClock, date, selectedService, services],
   );
   const availableSlots = dailySlots.filter((slot) => slot.available);
 
@@ -366,8 +451,13 @@ export default function BookingPage() {
       return;
     }
 
-    if (!date || isMonday(date)) {
+    if (!date || isClosedDay(date)) {
       setMessage(CLOSED_DAY_MESSAGE);
+      return;
+    }
+
+    if (isTodayAfterClosing(date)) {
+      setMessage(TODAY_CLOSED_MESSAGE);
       return;
     }
 
@@ -383,27 +473,77 @@ export default function BookingPage() {
     const phone = String(formData.get("phone"));
     const notes = String(formData.get("notes") ?? "");
 
-    const { data: currentAppointments, error: availabilityError } =
-      await supabase
+    const [
+      currentAppointmentsResult,
+      associationResult,
+      currentOperatorResult,
+      currentServiceResult,
+    ] = await Promise.all([
+      supabase
         .from("appointments")
         .select("time, service, service_id, status")
         .eq("date", date)
-        .eq("operator_id", selectedOperator.id);
+        .eq("operator_id", selectedOperator.id),
+      supabase
+        .from("operator_services")
+        .select("operator_id")
+        .eq("operator_id", selectedOperator.id)
+        .eq("service_id", selectedService.id)
+        .maybeSingle(),
+      supabase
+        .from("operators")
+        .select("id, name, active")
+        .eq("id", selectedOperator.id)
+        .eq("active", true)
+        .maybeSingle(),
+      supabase
+        .from("services")
+        .select("id, name, price, duration_minutes, active, created_at")
+        .eq("id", selectedService.id)
+        .eq("active", true)
+        .maybeSingle(),
+    ]);
 
-    if (availabilityError) {
+    const validationError =
+      currentAppointmentsResult.error ||
+      associationResult.error ||
+      currentOperatorResult.error ||
+      currentServiceResult.error;
+
+    if (validationError) {
+      console.error(
+        "Errore durante la verifica della disponibilità:",
+        validationError,
+      );
       setMessage(
-        `Impossibile verificare la disponibilità dello slot: ${availabilityError.message}`,
+        `Impossibile verificare la disponibilità dello slot: ${validationError.message}`,
       );
       setSubmitting(false);
       return;
     }
 
+    if (
+      !associationResult.data ||
+      !currentOperatorResult.data ||
+      !currentServiceResult.data
+    ) {
+      setMessage(
+        "Il servizio o l'operatore selezionato non è più disponibile. Effettua una nuova selezione.",
+      );
+      setSubmitting(false);
+      return;
+    }
+
+    const currentService = currentServiceResult.data as Service;
+    const currentOperator = currentOperatorResult.data as Operator;
     const updatedAppointments =
-      (currentAppointments ?? []) as ExistingAppointment[];
+      (currentAppointmentsResult.data ?? []) as ExistingAppointment[];
     const stillAvailable = createDailySlots(
-      selectedService.duration_minutes,
+      date,
+      currentService.duration_minutes,
       updatedAppointments,
       services,
+      new Date(),
     ).some((slot) => slot.time === time && slot.available);
 
     if (!stillAvailable) {
@@ -414,23 +554,28 @@ export default function BookingPage() {
       return;
     }
 
-    const { error } = await supabase.from("appointments").insert([
-      {
-        name,
-        phone,
-        service: selectedService.name,
-        service_id: selectedService.id,
-        operator_id: selectedOperator.id,
-        date,
-        time,
-        notes,
-        status: "pending",
-      },
-    ]);
+    const { data: insertedAppointment, error } = await supabase
+      .from("appointments")
+      .insert([
+        {
+          name,
+          phone,
+          service: currentService.name,
+          service_id: currentService.id,
+          operator_id: currentOperator.id,
+          date,
+          time,
+          notes,
+          status: "pending",
+        },
+      ])
+      .select("id, created_at")
+      .single();
 
     setSubmitting(false);
 
     if (error) {
+      console.error("Errore durante il salvataggio della prenotazione:", error);
       setMessage(
         `Impossibile salvare la prenotazione: ${
           error.message || "errore sconosciuto"
@@ -439,14 +584,29 @@ export default function BookingPage() {
       return;
     }
 
+    if (!insertedAppointment) {
+      console.error(
+        "Supabase non ha restituito la prenotazione appena salvata.",
+      );
+      setMessage(
+        "Impossibile verificare il salvataggio della prenotazione. Riprova.",
+      );
+      return;
+    }
+
+    console.info("Prenotazione salvata su Supabase:", {
+      id: insertedAppointment.id,
+      created_at: insertedAppointment.created_at,
+    });
+
     setConfirmation({
       name,
-      service: selectedService.name,
-      operator: selectedOperator.name,
+      service: currentService.name,
+      operator: currentOperator.name,
       date,
       time,
-      duration: selectedService.duration_minutes,
-      price: selectedService.price,
+      duration: currentService.duration_minutes,
+      price: currentService.price,
     });
     form.reset();
     setServiceId("");
@@ -733,14 +893,23 @@ export default function BookingPage() {
 
             {loadingSlots && <p className="text-gray-400">Caricamento...</p>}
 
-            {date && isMonday(date) && (
+            {date && isClosedDay(date) && (
               <p className="font-medium text-yellow-500">
                 {CLOSED_DAY_MESSAGE}
               </p>
             )}
 
             {date &&
-              !isMonday(date) &&
+              !isClosedDay(date) &&
+              isTodayAfterClosing(date, bookingClock) && (
+                <p className="font-medium text-yellow-500">
+                  {TODAY_CLOSED_MESSAGE}
+                </p>
+              )}
+
+            {date &&
+              !isClosedDay(date) &&
+              !isTodayAfterClosing(date, bookingClock) &&
               !loadingSlots &&
               availableSlots.length === 0 && (
                 <p className="font-medium text-yellow-500">
@@ -748,7 +917,10 @@ export default function BookingPage() {
                 </p>
               )}
 
-            {date && !isMonday(date) && !loadingSlots && (
+            {date &&
+              !isClosedDay(date) &&
+              !isTodayAfterClosing(date, bookingClock) &&
+              !loadingSlots && (
               <div className="grid grid-cols-3 gap-2 sm:grid-cols-5 md:grid-cols-6">
                 {dailySlots.map((slot) => (
                   <button
@@ -766,7 +938,13 @@ export default function BookingPage() {
                         : "cursor-not-allowed rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-2 text-xs text-zinc-400"
                     }
                   >
-                    {slot.available ? slot.time : `${slot.time} Occupato`}
+                    {slot.available
+                      ? slot.time
+                      : `${slot.time} ${
+                          slot.unavailableReason === "occupied"
+                            ? "Occupato"
+                            : "Non disponibile"
+                        }`}
                   </button>
                 ))}
               </div>
