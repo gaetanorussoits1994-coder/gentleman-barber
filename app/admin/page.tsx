@@ -19,7 +19,7 @@ type Appointment = {
 };
 
 type ArchivedAppointment = Appointment & {
-  archived_at: string;
+  archived_at?: string | null;
 };
 
 type AppointmentFilter = "today" | "future" | "past" | "all";
@@ -265,14 +265,16 @@ async function fetchAllAppointments() {
   }
 }
 
-async function fetchAllArchivedAppointments() {
+async function fetchArchivedAppointmentsTable() {
   const pageSize = 1000;
   const rows: ArchivedAppointment[] = [];
 
   for (let from = 0; ; from += pageSize) {
     const { data, error } = await supabase
       .from("appointments_archive")
-      .select("*")
+      .select(
+        "id, created_at, name, phone, service, service_id, operator_id, date, time, notes, status, archived_at",
+      )
       .order("archived_at", { ascending: false })
       .range(from, from + pageSize - 1);
 
@@ -286,6 +288,86 @@ async function fetchAllArchivedAppointments() {
       return { data: rows, error: null };
     }
   }
+}
+
+function getArchiveCutoffDate() {
+  const [year, month, day] = getAdminTodayString().split("-").map(Number);
+  const cutoff = new Date(Date.UTC(year, month - 1, day));
+
+  cutoff.setUTCDate(cutoff.getUTCDate() - 20);
+
+  return cutoff.toISOString().slice(0, 10);
+}
+
+async function fetchOldActiveAppointments() {
+  const pageSize = 1000;
+  const rows: ArchivedAppointment[] = [];
+  const cutoffDate = getArchiveCutoffDate();
+
+  for (let from = 0; ; from += pageSize) {
+    const { data, error } = await supabase
+      .from("appointments")
+      .select(
+        "id, created_at, name, phone, service, service_id, operator_id, date, time, notes, status",
+      )
+      .lt("date", cutoffDate)
+      .order("date", { ascending: false })
+      .order("time", { ascending: false })
+      .range(from, from + pageSize - 1);
+
+    if (error) {
+      return { data: null, error };
+    }
+
+    rows.push(...((data ?? []) as ArchivedAppointment[]));
+
+    if ((data ?? []).length < pageSize) {
+      return { data: rows, error: null };
+    }
+  }
+}
+
+function isMissingArchiveTableError(error: { code?: string; message: string }) {
+  return (
+    error.code === "PGRST205" ||
+    error.code === "42P01" ||
+    error.message.toLowerCase().includes("could not find the table")
+  );
+}
+
+async function fetchAllArchivedAppointments() {
+  const [archiveResult, oldAppointmentsResult] = await Promise.all([
+    fetchArchivedAppointmentsTable(),
+    fetchOldActiveAppointments(),
+  ]);
+
+  if (oldAppointmentsResult.error) {
+    return { data: null, error: oldAppointmentsResult.error };
+  }
+
+  if (
+    archiveResult.error &&
+    !isMissingArchiveTableError(archiveResult.error)
+  ) {
+    return { data: null, error: archiveResult.error };
+  }
+
+  const appointmentsById = new Map<string, ArchivedAppointment>();
+
+  for (const appointment of [
+    ...(archiveResult.data ?? []),
+    ...(oldAppointmentsResult.data ?? []),
+  ]) {
+    appointmentsById.set(String(appointment.id), appointment);
+  }
+
+  const data = [...appointmentsById.values()].sort(
+    (first, second) =>
+      second.date.localeCompare(first.date) ||
+      second.time.localeCompare(first.time),
+  );
+
+  return { data, error: null };
 }
 
 export default function AdminPage() {
@@ -984,7 +1066,7 @@ export default function AdminPage() {
 
   function createCsvRows(items: Appointment[], includeArchivedAt = false) {
     const header = [
-      "Nome",
+      includeArchivedAt ? "Cliente" : "Nome",
       "Telefono",
       "Servizio",
       "Operatore",
@@ -994,7 +1076,9 @@ export default function AdminPage() {
       "Prezzo (EUR)",
       "Stato",
       "Note",
-      "Data e ora invio richiesta",
+      includeArchivedAt
+        ? "Data invio prenotazione"
+        : "Data e ora invio richiesta",
     ];
 
     if (includeArchivedAt) {
@@ -1069,12 +1153,12 @@ export default function AdminPage() {
     const archivedAppointments = archiveResult.data ?? [];
 
     if (archivedAppointments.length === 0) {
-      showNotice("L'archivio non contiene prenotazioni da esportare.");
+      showNotice("Nessuna prenotazione archiviata da esportare.");
       return;
     }
 
     downloadCsv(
-      "archivio-prenotazioni-the-gentleman.csv",
+      "archivio-prenotazioni.csv",
       createCsvRows(archivedAppointments, true),
     );
     showNotice(
